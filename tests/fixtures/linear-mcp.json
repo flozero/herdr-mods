@@ -1,0 +1,97 @@
+{
+  "whoami": {
+    "user": { "id": "u-1", "name": "Ada Example", "email": "ada@example.com", "displayName": "ada", "isAdmin": false, "isGuest": false, "isActive": true },
+    "workspace": { "id": "w-1", "name": "Example Co", "url": "https://linear.app/example" },
+    "connection": { "client": "Herdr Linear mod", "access": "read-write" }
+  },
+  "get_user": {
+    "id": "u-1", "name": "Ada Example", "email": "ada@example.com", "displayName": "ada", "avatarUrl": null, "isAdmin": false, "isGuest": false, "isActive": true,
+    "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2025-01-01T00:00:00.000Z", "status": "active",
+    "teams": [{ "id": "t-1", "name": "Engine", "key": "ENG" }]
+  },
+  "list_teams": {
+    "teams": [
+      { "id": "t-1", "key": "ENG", "parentId": null, "displayName": "Engine", "icon": "Cube", "name": "Engine", "description": "", "visibility": "public", "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2025-01-01T00:00:00.000Z" },
+      { "id": "t-2", "key": "OPS", "parentId": null, "displayName": "Ops", "icon": "Cube", "name": "Ops", "description": "", "visibility": "public", "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2025-01-01T00:00:00.000Z" }
+    ],
+    "hasNextPage": false
+  },
+  "list_users": {
+    "users": [
+      { "id": "u-1", "name": "Ada Example", "email": "ada@example.com", "displayName": "ada", "isAdmin": false, "isGuest": false, "isActive": true, "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2025-01-01T00:00:00.000Z", "status": "active" },
+      { "id": "u-2", "name": "Gone Person", "email": "gone@example.com", "displayName": "gone", "isAdmin": false, "isGuest": false, "isActive": false, "createdAt": "2024-01-01T00:00:00.000Z", "updatedAt": "2025-01-01T00:00:00.000Z", "status": "inactive" }
+    ],
+    "hasNextPage": false
+  },
+  "list_issues": {
+    "issues": [
+      {
+        "id": "ENG-42", "uuid": "11111111-1111-4111-8111-111111111111", "title": "Fix the widget", "description": "The widget breaks.",
+        "priority": { "value": 2, "name": "High" }, "estimate": { "value": 2, "name": "2 Points" }, "url": "https://linear.app/example/issue/ENG-42/fix-the-widget",
+        "gitBranchName": "ada/eng-42-fix-the-widget", "createdAt": "2025-01-02T00:00:00.000Z", "updatedAt": "2025-01-05T00:00:00.000Z",
+        "archivedAt": null, "completedAt": null, "startedAt": "2025-01-03T00:00:00.000Z", "canceledAt": null, "dueDate": null,
+        "slaStartedAt": null, "slaMediumRiskAt": null, "slaHighRiskAt": null, "slaBreachesAt": null,
+        "status": "In Development", "statusType": "started", "labels": ["bug"], "createdBy": "Ada Example", "createdById": "u-1",
+        "assignee": "Ada Example", "assigneeId": "u-1", "project": "Widgets", "projectId": "p-1", "parentId": "ENG-40", "team": "Engine", "teamId": "t-1"
+      },
+      {
+        "id": "ENG-41", "uuid": "22222222-2222-4222-8222-222222222222", "title": "Old thing", "description": "",
+        "priority": { "value": 0, "name": "No priority" }, "url": "https://linear.app/example/issue/ENG-41/old-thing",
+        "gitBranchName": "ada/eng-41-old-thing", "createdAt": "2025-01-01T00:00:00.000Z", "updatedAt": "2025-01-04T00:00:00.000Z",
+        "archivedAt": null, "dueDate": null, "status": "Released", "statusType": "completed", "labels": [],
+        "createdBy": "Ada Example", "createdById": "u-1", "team": "Engine", "teamId": "t-1"
+      }
+    ],
+    "hasNextPage": true,
+    "cursor": "cursor-1"
+  },
+  "get_issue": {
+    "id": "ENG-42", "uuid": "11111111-1111-4111-8111-111111111111", "title": "Fix the widget", "description": "The widget breaks.",
+    "priority": { "value": 2, "name": "High" }, "url": "https://linear.app/example/issue/ENG-42/fix-the-widget", "gitBranchName": "ada/eng-42-fix-the-widget",
+    "createdAt": "2025-01-02T00:00:00.000Z", "updatedAt": "2025-01-05T00:00:00.000Z", "archivedAt": null, "dueDate": null,
+    "status": "In Development", "statusType": "started", "labels": ["bug"],
+    "attachments": [{ "id": "a-1", "title": "Fix the widget", "subtitle": null, "url": "https://gitlab.example.com/group/repo/-/merge_requests/7" }],
+    "documents": [],
+    "stateHistory": [
+      { "state": { "id": "s-1", "name": "Backlog", "type": "backlog" }, "startedAt": "2025-01-02T00:00:00.000Z", "endedAt": "2025-01-03T00:00:00.000Z" },
+      { "state": { "id": "s-2", "name": "In Development", "type": "started" }, "startedAt": "2025-01-03T00:00:00.000Z", "endedAt": null }
+    ],
+    "createdBy": "Ada Example", "createdById": "u-1", "assignee": "Ada Example", "assigneeId": "u-1", "project": "Widgets", "projectId": "p-1",
+    "parentId": "ENG-40", "team": "Engine", "teamId": "t-1",
+    "relations": { "blocks": [], "blockedBy": [{ "id": "OPS-3", "title": "Unblock the widget" }], "relatedTo": [{ "id": "ENG-7", "title": "Widget docs" }], "duplicateOf": null }
+  },
+  "list_comments": {
+    "comments": [
+      { "id": "c-2", "body": "Later reply", "attachments": [], "createdAt": "2025-01-04T00:00:00.000Z", "updatedAt": "2025-01-04T01:00:00.000Z", "parentId": "c-1", "resolvedAt": null, "quotedText": null, "author": { "id": "u-1", "name": "Ada Example" }, "onBehalfOf": null },
+      { "id": "c-1", "body": "First", "attachments": [], "createdAt": "2025-01-03T00:00:00.000Z", "updatedAt": "2025-01-03T00:00:00.000Z", "parentId": null, "resolvedAt": null, "quotedText": null, "author": { "id": "u-1", "name": "Ada Example" }, "onBehalfOf": null }
+    ],
+    "hasNextPage": false
+  },
+  "list_issue_statuses": [
+    { "id": "s-3", "type": "completed", "name": "Released" },
+    { "id": "s-1", "type": "backlog", "name": "Backlog" },
+    { "id": "s-0", "type": "triage", "name": "Triage" },
+    { "id": "s-2", "type": "started", "name": "In Development" },
+    { "id": "s-4", "type": "unstarted", "name": "Todo" }
+  ],
+  "list_custom_views": {
+    "customViews": [
+      { "id": "v-uuid-0000-0000-0000-a0cdb3863cef", "name": "Bugs", "description": null, "modelName": "Issue", "shared": true, "team": { "id": "t-1", "name": "Engine", "key": "ENG" }, "url": "https://linear.app/example/view/v-uuid-0000-0000-0000-a0cdb3863cef" }
+    ],
+    "hasNextPage": false
+  },
+  "get_project": {
+    "id": "P-ENG-1", "uuid": "p-1", "icon": "Cube", "color": "#5e6ad2", "name": "Widgets", "summary": "Better widgets", "description": "# Widgets\nAll of them.",
+    "url": "https://linear.app/example/project/widgets-0123456789ab", "resourceCount": 0, "createdAt": "2025-01-01T00:00:00.000Z", "updatedAt": "2025-01-05T00:00:00.000Z",
+    "startDate": "2025-01-01", "targetDate": "2025-03-01", "priority": { "value": 0, "name": "No priority" }, "labels": [], "initiatives": [],
+    "lead": { "id": "u-1", "name": "Ada Example" }, "leadTeam": { "id": "t-1", "name": "Engine", "key": "ENG" },
+    "status": { "id": "ps-1", "name": "In Progress", "type": "started" }, "teams": [{ "id": "t-1", "name": "Engine", "key": "ENG" }],
+    "members": [{ "id": "u-1", "name": "Ada Example", "email": "ada@example.com" }], "milestones": [{ "id": "m-1", "name": "Beta", "targetDate": "2025-02-01" }]
+  },
+  "get_status_updates": {
+    "statusUpdates": [
+      { "id": "su-1", "body": "Going fine", "health": "onTrack", "url": "https://linear.app/example/project/widgets-0123456789ab/updates", "createdAt": "2025-01-04T00:00:00.000Z", "updatedAt": "2025-01-04T00:00:00.000Z", "editedAt": null, "archivedAt": null, "diffMarkdown": "", "isDiffHidden": false, "user": { "id": "u-1", "name": "Ada Example" }, "type": "project", "project": { "id": "p-1", "name": "Widgets" } }
+    ],
+    "hasNextPage": false
+  }
+}

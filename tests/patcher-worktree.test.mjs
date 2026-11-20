@@ -192,6 +192,22 @@ test("the branch is suggested from the first message until it is typed by hand",
   assert.equal(h.executions.length, 0);
 });
 
+test("the agent and the branch namer come from worktrees.agent and worktrees.branchAgent", { skip }, async () => {
+  const h = harness({ settings: { worktrees: { agent: ["codex"], branchAgent: ["namer", "-q"] } }, reply: (command) => (command === "namer" ? { code: 0, stdout: "fix-it\n" } : undefined) });
+  Object.assign(h.worktree, { text: "x", worktrees: await h.worktreeSettings(repo, "/home/user", null, true) });
+  h.worktree.message.set_value("fix it");
+  await h.worktree.create({});
+  assert.deepEqual(h.writes[0][1].argv, ["codex"]);
+  assert.equal(h.worktree.namer("fix it").at(-1).endsWith("\n\nfix it"), true);
+  assert.deepEqual(h.worktree.namer("fix it").slice(0, 2), ["namer", "-q"]);
+
+  const other = harness({ settings: { worktrees: { agent: ["codex"] } } });
+  other.worktree.worktrees = await other.worktreeSettings(repo, "/home/user", null, true);
+  assert.equal(other.worktree.namer("fix it"), null);
+  const wrong = harness({ settings: { worktrees: { agent: "codex" } } });
+  await assert.rejects(wrong.worktreeSettings(repo, "/home/user", null, true), /worktrees.agent must be a list of strings/);
+});
+
 test("a locked worktree needs Enter twice, then goes with --force --force and takes its branch along", { skip }, async () => {
   const linked = { ...repo, top: "/home/user/code/repo/.claude/worktrees/x", linked: true };
   const reply = (command, args) => (args.includes("--absolute-git-dir") ? { code: 0, stdout: "/home/user/code/repo/.git/worktrees/x\n" } : undefined);

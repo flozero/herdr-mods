@@ -18,6 +18,7 @@ import * as Doc from "./doc.js";
 import { historyEntries, createdBy } from "./history.js";
 import { projectEvents } from "./activity.js";
 import { editPoint, mentionAt, rankPeople, insertMention } from "./mention.js";
+import { agentArgv, agentName, askArgv } from "./agent.js";
 
 const BASE = "mods/linear";
 const ICON = `${BASE}/icons`;
@@ -84,6 +85,7 @@ const ASK_DENY = [
   "Bash(git commit:*)", "Bash(git push:*)", "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git reset:*)",
   "Bash(git stash:*)", "Bash(git rebase:*)", "Bash(git merge:*)", "Bash(glab mr note:*)", "Bash(glab api:*)",
   "Bash(node ~/.config/herdr-app/mods/linear/cli/linear-me.mjs call save_*)", "Bash(node ~/.config/herdr-app/mods/linear/cli/linear-me.mjs call delete_*)",
+  `Bash(node ${appHome()}/${BASE}/cli/linear-me.mjs call save_*)`, `Bash(node ${appHome()}/${BASE}/cli/linear-me.mjs call delete_*)`,
   "mcp__linear-me__save_comment", "mcp__linear-me__save_issue", "mcp__linear-me__delete_comment",
 ];
 const load = (k, d) => STORE.get(k, d);
@@ -95,7 +97,7 @@ const stop = (_e, cx) => cx.stop_propagation();
 export default class Linear extends View {
   init(_props, cx) {
     this.focusUntil = Date.now() + 2000;
-    this.config = { agent: ["claude"], agentName: null, refreshSeconds: 60, taskContext: true, cacheDays: 30, worktreeMod: null, email: null,
+    this.config = { agent: ["claude"], agentName: null, refreshSeconds: 120, taskContext: true, cacheDays: 30, worktreeMod: null,
       worktreeRepo: null, branchPrefix: null, skill: null };
     this.branchPrefix = null;
     this.origin = props()?.origin ? this.placeOf(props().origin) : this.focusedPlace();
@@ -112,8 +114,6 @@ export default class Linear extends View {
     this.foundIds = []; // every identifier the terminal mentions, cached or not
     this.details = {}; // identifier → detail
     this.server = []; // server filter search results
-    this.deep = []; // deep (comment) search results
-    this.deepFor = null;
     this.tab = "all";
     this.query = "";
     this.sel = 0;
@@ -295,28 +295,26 @@ export default class Linear extends View {
   }
 
   // config.json next to this file (optional):
-  // { "language": "en" | "ko", "email": "", "agent": ["claude"], "agentName": "Claude", "refreshSeconds": 60,
+  // { "language": "en" | "ko", "agent": ["claude"], "agentName": "Claude", "refreshSeconds": 120,
 //   "taskContext": true, "terminalIssues": true, "nestSubIssues": true }
   async loadConfig() {
     try {
       const c = JSON.parse(await fs.readFile(`${appHome()}/${BASE}/config.json`, "utf8"));
       Object.assign(this.config, c);
     } catch {}
-    api.setApiKey(this.config.apiKey);
+    api.setRunner((calls) => this.linearBatch(calls));
     setLanguage(this.config.language ?? "en");
   }
 
   agentName() {
-    if (this.config.agentName) return this.config.agentName;
-    const bin = String(this.config.agent?.[0] ?? "agent").split("/").pop();
-    return bin.charAt(0).toUpperCase() + bin.slice(1);
+    return agentName(this.config);
   }
 
   // ── Data ──────────────────────────────────────────────
 
   remember(list) {
     this.dataVer++;
-    for (const i of list) if (i?.identifier) this.cache[i.identifier] = slim(i);
+    for (const i of list) if (i?.identifier) this.cache[i.identifier] = slim(this.filled(i));
     const ids = Object.keys(this.cache);
     if (ids.length > CACHE_MAX) {
       const keep = new Set([...this.recent, ...this.mine.map((i) => i.identifier)]);
@@ -324,6 +322,14 @@ export default class Linear extends View {
       for (const id of ids.slice(0, ids.length - CACHE_MAX)) if (!keep.has(id)) delete this.cache[id];
     }
     save("cache", this.cache);
+  }
+
+  filled(i) {
+    const prev = this.cache[i.identifier], parent = i.parent && this.cache[i.parent.identifier];
+    let out = i;
+    if (!out.attachments && prev?.attachments) out = { ...out, attachments: prev.attachments };
+    if (out.parent && !out.parent.title && parent) out = { ...out, parent: { ...out.parent, id: parent.id, title: parent.title, state: parent.state } };
+    return out;
   }
 
   async call(cx, label, fn) {
@@ -373,6 +379,10 @@ export default class Linear extends View {
     try { return JSON.parse(r?.stdout ?? "").connected === true; } catch { return false; }
   }
 
+  async linearBatch(calls) {
+    return this.linearMe(null, calls);
+  }
+
   async linearMe(tool, args) {
     const dir = `${appHome()}/${BASE}/.cache`;
     const file = `${dir}/call-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
@@ -380,7 +390,7 @@ export default class Linear extends View {
     try {
       await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", dir]);
       await fs.writeFile(file, JSON.stringify(args));
-      r = await exec("node", [CLI(), "call", tool, `@${file}`], { timeout: 60000 });
+      r = await exec("node", [CLI(), ...(tool ? ["call", tool] : ["batch"]), `@${file}`], { timeout: 60000 });
     } finally {
       await exec("rm", ["-f", file]).catch(() => {});
     }
@@ -398,6 +408,7 @@ export default class Linear extends View {
       const r = await exec("node", [CLI(), "login"], { timeout: 330000 }).catch((e) => ({ code: 1, stdout: "", stderr: String(e) }));
       this.connecting = false;
       this.canWrite = await this.linearConnected();
+      if (this.canWrite) cx.spawn(async (cx) => this.refresh(cx));
       this.say(this.canWrite ? T().connected : `${T().connectFailed}: ${(r.stderr || r.stdout || "").trim().split("\n").pop()}`, cx, this.canWrite ? "success" : "error");
     });
   }
@@ -488,7 +499,8 @@ export default class Linear extends View {
     if (!issue || Date.now() - (this.askedAt ?? 0) < 800) return;
     this.askedAt = Date.now();
     const id = issue.identifier, tr = T();
-    this.say(tr.askStarting(id), cx);
+    const agent = this.agentName();
+    this.say(tr.askStarting(id, agent), cx);
     cx.spawn(async (cx) => {
       try {
         let term = this.askers?.[id];
@@ -500,7 +512,7 @@ export default class Linear extends View {
         } else {
           const brief = await this.taskFor(issue, false, cx, tr.askTask(issue));
           const text = question ? `${brief}\n\n${tr.askQuestion}: ${question}` : brief;
-          const argv = [...(this.config.agent?.length ? this.config.agent : ["claude"]), "--settings", JSON.stringify({ permissions: { deny: ASK_DENY } })];
+          const argv = askArgv(this.config, ASK_DENY);
           const cwd = this.places.preferred || home();
           const name = `ask-${id.toLowerCase()}-${Date.now().toString(36)}`;
           const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", cwd, "--", ...argv, text]);
@@ -511,10 +523,10 @@ export default class Linear extends View {
         const shown = await this.showRight(cx, term);
         const pane = panes().find((p) => p.terminal === term)?.pane;
         if (pane && !question) run("pane.focus", { pane });
-        this.say(shown ? (question ? tr.askSent(id) : tr.askReady(id)) : tr.askBackground(id), cx, "success");
+        this.say(shown ? (question ? tr.askSent(id, agent) : tr.askReady(id, agent)) : tr.askBackground(id, agent), cx, "success");
       } catch (e) {
         this.askedAt = 0;
-        this.say(`${tr.askFailed}: ${e?.message ?? e}`, cx, "error");
+        this.say(`${tr.askFailed(agent)}: ${e?.message ?? e}`, cx, "error");
       }
     });
   }
@@ -675,7 +687,7 @@ export default class Linear extends View {
     cx.spawn(async (cx) => {
       const states = await this.call(cx, "states", () => api.teamStates(issue.team.id));
       if (this.statePick?.id !== id) return;
-      this.statePick = { id, states: states ?? [], sel: Math.max(0, (states ?? []).findIndex((x) => x.id === issue.state?.id)) };
+      this.statePick = { id, states: states ?? [], sel: Math.max(0, (states ?? []).findIndex((x) => x.name === issue.state?.name)) };
       cx.notify();
     });
   }
@@ -707,9 +719,8 @@ export default class Linear extends View {
   }
 
   async findMe() {
-    const email = this.config.email || (await exec("git", ["config", "--global", "user.email"])).stdout.trim();
-    const me = await api.viewer(email);
-    if (!me) throw new Error(T().noUser(email));
+    const me = await api.viewer();
+    if (!me) throw new Error(T().noUser);
     return me;
   }
 
@@ -903,7 +914,7 @@ export default class Linear extends View {
   }
 
   onQuery(text, cx) {
-    this.query = text; this.sel = 0; this.deep = []; this.deepFor = null;
+    this.query = text; this.sel = 0;
     const mine = ++this.queryGen;
     cx.timer.after(300, (cx) => { if (mine === this.queryGen) this.searchServer(cx, text); });
     cx.notify();
@@ -912,17 +923,12 @@ export default class Linear extends View {
   async searchServer(cx, text) {
     const q = Q.parse(text);
     if (Q.isEmpty(q)) { this.server = []; return; }
-    const r = await this.call(cx, "search", () => api.filterIssues(Q.serverFilter(q, this.teamIds(), this.viewer?.id)));
+    const found = await this.call(cx, "search", () => api.searchIssues(Q.searchCalls(q)));
+    const r = found?.filter((i) => Q.localScore(i, q, this.viewer?.id) >= 0);
     if (r && this.query === text) { this.server = r; this.serverFor = text; this.remember(r); }
   }
 
-  async searchDeep(cx) {
-    const q = Q.parse(this.query);
-    const term = Q.textOf(q);
-    if (!term) return;
-    const r = await this.call(cx, "deep", () => api.deepSearch(term, Q.tokenFilter(q, this.viewer?.id)));
-    if (r) { this.deep = r; this.deepFor = this.query; this.remember(r); }
-  }
+
 
 
   // ── List ──────────────────────────────────────────────
@@ -939,10 +945,7 @@ export default class Linear extends View {
   async fetchFound(cx) {
     const missing = (this.foundIds ?? []).filter((id) => !this.cache[id]);
     if (!missing.length) return;
-    const byTeam = {};
-    for (const id of missing) { const [k, n] = id.split("-"); (byTeam[k] ??= []).push(Number(n)); }
-    const filter = { or: Object.entries(byTeam).map(([k, ns]) => ({ team: { key: { eq: k } }, number: { in: ns } })) };
-    const got = await this.call(cx, "found", () => api.filterIssues(filter));
+    const got = await this.call(cx, "found", () => api.issuesById(missing));
     if (!got?.length) return;
     this.remember(got);
     this.found = [...this.found, ...missing.filter((id) => this.cache[id])];
@@ -987,7 +990,7 @@ export default class Linear extends View {
   // Everything rows() reads. A render asks for the rows several times (selection, preview, list),
   // and a search scores every cached issue, so it's computed once per change.
   rowsKey() {
-    return [this.query, this.tab, this.mine, this.all, this.all.length, this.server, this.serverFor, this.deep, this.deepFor,
+    return [this.query, this.tab, this.mine, this.all, this.all.length, this.server, this.serverFor,
       this.found, this.recent, this.allMore, this.dataVer, this.foldVer, this.branchIssue(), this.sort.by, this.sort.asc, this.hideClosed, this.nest, this.viewData, this.layout];
   }
 
@@ -1120,13 +1123,6 @@ export default class Linear extends View {
     if (this.serverFor === this.query) for (const i of this.server) consider(i, 0);
     const ranked = [...seen.values()].sort((a, b) => b.s - a.s || (b.i.updatedAt ?? "").localeCompare(a.i.updatedAt ?? ""));
     out.push(...this.nested(this.sorted(this.visible(ranked.map(({ i }) => i), q))));
-    if (this.deepFor === this.query) {
-      const have = new Set(ranked.map(({ i }) => i.identifier));
-      const extra = this.deep.filter((i) => !have.has(i.identifier));
-      if (extra.length) out.push({ kind: "head", text: T().deepHead }, ...extra.map((issue) => ({ kind: "issue", issue, deep: true })));
-    } else if (Q.hasText(q)) {
-      out.push({ kind: "deep" });
-    }
     return out;
   }
 
@@ -1367,7 +1363,6 @@ export default class Linear extends View {
   activate(r, cx) {
     if (!r) return;
     if (r.kind === "issue") this.openDetail(r.issue.identifier, cx, true);
-    else if (r.kind === "deep") this.searchDeep(cx);
     else if (r.kind === "more") { const v = viewIdOf(this.tab); if (v) this.loadView(cx, v, true); else this.moreAll(cx); }
   }
 
@@ -1608,7 +1603,7 @@ export default class Linear extends View {
       try {
         const remote = Boolean(c.space ? c.space.machine : c.machine);
         const task = await this.taskFor(issue, remote, cx);
-        await this.places.start(c, { name: issue.identifier, argv: this.config.agent, task });
+        await this.places.start(c, { name: issue.identifier, argv: agentArgv(this.config), task });
         this.pick = null;
         this.dismiss();
       } catch (e) {
@@ -2090,6 +2085,8 @@ export default class Linear extends View {
     if (!rows.length) {
       const msg = this.query ? (this.loading.has("search") ? T().searching : T().noMatch)
         : this.tab === "recent" ? T().noRecent : this.loading.size ? T().loading : T().noIssues;
+      if (!this.canWrite && !this.query) return this.empty(t, msg).gap(10)
+        .child(this.button(t, "l-connect", this.connecting ? T().connecting : T().connectLinear, (cx) => this.connect(cx)));
       return this.empty(t, msg);
     }
     const pickable = rows.filter((r) => r.kind !== "head");
@@ -2100,13 +2097,13 @@ export default class Linear extends View {
 
   boardView(t) {
     const cols = this.boardColumns();
-    const extras = this.pickable().filter((r) => r.kind === "more" || r.kind === "deep");
+    const extras = this.pickable().filter((r) => r.kind === "more");
     if (!cols.length && !extras.length) return this.listView(t);
     const sel = this.selected();
     const busy = this.loading.has("all") || this.loading.has(`v:${viewIdOf(this.tab)}`);
     return v_flex().flex_1().min_h(0).w_full()
       .when(extras.length > 0, (el) => el.child(h_flex().px(12).pt(10).gap(8).children(extras.map((r) =>
-        this.button(t, `bx-${r.kind}`, r.kind === "deep" ? T().deepRow : busy ? T().loading : T().more, (cx) => this.activate(r, cx))))))
+        this.button(t, `bx-${r.kind}`, busy ? T().loading : T().more, (cx) => this.activate(r, cx))))))
       .child(h_flex().id("l-board").flex_1().min_h(0).w_full().p(12).gap(12).overflow_x_scrollbar()
         .children(cols.map((col, n) => v_flex().w(BOARD_COL).flex_none().h_full().min_h(0).gap(8)
           .child(h_flex().h(26).px(4).gap(8).items_center().flex_none()
@@ -2176,7 +2173,6 @@ export default class Linear extends View {
         if (on || e.click_count === 2) this.activate(r, cx);
         else { this.sel = index; this.schedulePreview(cx); cx.notify(); }
       });
-    if (r.kind === "deep") return base("l-deep").mt(4).text_color(t.muted).child(T().deepRow);
     if (r.kind === "more") return base("l-more").mt(4).text_color(t.muted).child(this.loading.has("all") || this.loading.has(this.tab) ? T().loading : T().more);
     const i = r.issue;
     const link = this.links?.[i.identifier];
@@ -2482,9 +2478,9 @@ export default class Linear extends View {
           .child(div().flex_1())
           .child(this.button(t, "po-open", tr.projectOpen, (cx) => this.openUrl(p.url, cx))))
         .child(h_flex().gap(16).items_center().flex_wrap()
-          .child(h_flex().gap(8).items_center()
+          .when(p.progress != null, (el) => el.child(h_flex().gap(8).items_center()
             .child(div().w(120).h(6).rounded(3).bg(t.border).child(div().h_full().rounded(3).bg(t.done).w(Math.max(2, Math.round(1.2 * pct)))))
-            .child(div().text_size(12).text_color(t.muted).child(`${pct}%`)))
+            .child(div().text_size(12).text_color(t.muted).child(`${pct}%`))))
           .children([fact(tr.projectLead, p.lead?.name), fact(tr.projectTeams, (p.teams?.nodes ?? []).map((x) => x.key).join(", ")),
             fact(tr.projectStart, p.startDate), fact(tr.projectTarget, p.targetDate)].filter(Boolean))))
       .child(v_flex().gap(8)
@@ -2673,7 +2669,7 @@ export default class Linear extends View {
         .child(this.button(t, "d-go", tr.goTab, () => this.goTab(link), true))))
       .child(h_flex().gap(6).flex_wrap()
         .child(this.button(t, "d-work", link ? tr.newAgentTab(agent) : tr.workWith(agent), (cx) => this.work(issue, cx), !link))
-        .child(this.button(t, "d-ask", tr.askClaude, (cx) => this.askClaude(issue, cx)))
+        .child(this.button(t, "d-ask", tr.askAgent(agent), (cx) => this.askClaude(issue, cx)))
         .when(this.canWrite && !editing, (el) => el.child(this.button(t, "d-edit", tr.editIssue, (cx) => this.editIssue(id, cx))))
         .when(this.canWrite && issue.assignee?.id !== this.viewer?.id, (el) => el.child(this.button(t, "d-assign", tr.assignMe, (cx) => this.assignMe(issue, cx))))
         .when(!this.canWrite, (el) => el.child(this.button(t, "d-connect", this.connecting ? tr.connecting : tr.connectLinear, (cx) => this.connect(cx))))
@@ -2850,7 +2846,7 @@ export default class Linear extends View {
 
   footer(t) {
     const s = this.flash ?? this.status;
-    const hint = this.editFocus ? T().editHint : this.composing ? T().commentHint : this.mode === "detail" ? (this.canWrite ? T().hintDetailWrite : T().hintDetail) : this.typing ? T().hintSearch : this.layout === "board" ? T().hintBoard : T().hintList;
+    const hint = this.editFocus ? T().editHint : this.composing ? T().commentHint(this.agentName()) : this.mode === "detail" ? (this.canWrite ? T().hintDetailWrite : T().hintDetail)(this.agentName()) : this.typing ? T().hintSearch : this.layout === "board" ? T().hintBoard : T().hintList;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
       .child(div().flex_1().min_w(0).truncate().text_color(s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim).child(s?.text ?? hint))
       .child(div().flex_none().text_color(t.dim).child(this.viewer ? `${this.viewer.displayName ?? this.viewer.name} · ${T().teams} ${(this.viewer.teams?.nodes ?? []).map((x) => x.key).join(" ")}` : ""));
@@ -2890,7 +2886,7 @@ export default class Linear extends View {
     const busy = this.places.scanning();
     return v_flex().flex_1().min_h(0).w_full().p(16).gap(10)
       .child(h_flex().gap(8).items_center()
-        .child(div().text_size(15).font_semibold().child(tr.pickTitle(this.config.agentName ?? "Claude", issue.identifier)))
+        .child(div().text_size(15).font_semibold().child(tr.pickTitle(this.agentName(), issue.identifier)))
         .when(busy, (el) => el.child(svg(`${ICON}/spinner.svg`).size(13).text_color(t.dim).spin(900)).child(div().text_size(11.5).text_color(t.dim).child(tr.scanning))))
       .child(div().text_size(12).text_color(t.muted).truncate().child(issue.title))
       .child(v_flex().id("pk-list").flex_1().min_h(0).gap(2).overflow_y_scrollbar().children(rows))

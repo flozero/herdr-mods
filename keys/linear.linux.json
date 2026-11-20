@@ -1,0 +1,4 @@
+{
+  "global": { "ctrl-shift-i": "mod.open:linear-current", "ctrl-alt-i": "mod.open:linear-open" },
+  "mod:linear": { "ctrl-r": "linear.refresh" }
+}

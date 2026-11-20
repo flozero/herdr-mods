@@ -6,5 +6,6 @@
   "agent": [
     "claude"
   ],
+  "agentName": "Claude",
   "skill": ""
 }

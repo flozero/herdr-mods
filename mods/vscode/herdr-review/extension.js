@@ -71,7 +71,7 @@ async function baseOf(repo) {
   const configured = vscode.workspace.getConfiguration("herdrReview").get("base");
   const head = (await run("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], repo)).stdout.trim();
   for (const candidate of [configured, head, "origin/main", "origin/master"].filter(Boolean)) {
-    const found = await run("git", ["merge-base", "HEAD", candidate], repo);
+    const found = await run("git", ["merge-base", "--end-of-options", "HEAD", candidate], repo);
     if (found.ok && found.stdout.trim()) return { name: candidate, commit: found.stdout.trim() };
   }
   return null;

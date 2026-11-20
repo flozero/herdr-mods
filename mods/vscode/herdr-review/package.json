@@ -2,7 +2,7 @@
   "name": "herdr-review",
   "displayName": "Herdr Review",
   "description": "Comment lines in files and diffs, then send the review to the agent working in the folder.",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "publisher": "herdr",
   "license": "MIT",
   "engines": {
@@ -188,11 +188,13 @@
           "default": [
             "claude"
           ],
+          "scope": "application",
           "description": "The agent to start, in a pane below, when none works in the repository. The review is its last argument."
         },
         "herdrReview.base": {
           "type": "string",
           "default": "",
+          "scope": "application",
           "description": "The branch Branch Changes compares against. Empty: origin's default branch."
         }
       }

@@ -6,7 +6,7 @@ export function headerLines(text) {
 }
 
 export function curlArgs({ method, url, headerFile, bodyFile, outFile, headersOut, hasBody, follow = true, timeout = 60 }) {
-  const args = ["-sS", "-X", method, "--max-time", String(timeout), "-o", outFile, "-D", headersOut, "-w", WRITE];
+  const args = ["-q", "--proto", "=http,https", "--proto-redir", "=http,https", "-sS", "-X", method, "--max-time", String(timeout), "-o", outFile, "-D", headersOut, "-w", WRITE];
   if (follow) args.push("-L", "--max-redirs", "5");
   if (headerFile) args.push("-H", `@${headerFile}`);
   if (hasBody && method !== "GET" && method !== "HEAD") args.push("--data-binary", `@${bodyFile}`);

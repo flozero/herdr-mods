@@ -1,3 +1,8 @@
 {
-  "rulesUrl": ""
+  "rulesUrl": "",
+  "agent": [
+    "claude"
+  ],
+  "agentName": "Claude",
+  "agentAskArgs": null
 }

@@ -233,7 +233,10 @@ export default class Http extends View {
     cx.notify();
   }
 
-  async root() { return ROOT(); }
+  async root() {
+    await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", ROOT()]);
+    return ROOT();
+  }
 
   async loadProjects() {
     const root = await this.root();
@@ -353,7 +356,7 @@ export default class Http extends View {
   onKey(e, cx) {
     const k = e.keystroke;
     if (k === "cmd-enter" || k === "ctrl-enter") { this.send(cx); cx.stop_propagation(); return; }
-    if (k === "cmd-shift-c") { this.copyCurl(cx); cx.stop_propagation(); return; }
+    if (k === "cmd-shift-c" || k === "ctrl-shift-c") { this.copyCurl(cx); cx.stop_propagation(); return; }
     if (k === "escape") {
       if (this.naming) this.cancelNaming(cx);
       else if (this.menu) { this.menu = false; cx.notify(); }

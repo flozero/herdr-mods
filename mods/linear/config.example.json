@@ -1,12 +1,11 @@
 {
   "language": "en",
-  "apiKey": "",
-  "email": "",
   "agent": [
     "claude"
   ],
   "agentName": "Claude",
-  "refreshSeconds": 60,
+  "agentAskArgs": null,
+  "refreshSeconds": 120,
   "taskContext": true,
   "terminalIssues": true,
   "nestSubIssues": true,

@@ -122,7 +122,7 @@ for f in "$b".png "$b".jpg "$b".gif "$b".webp "$b".svg; do
   if [ -f "$f" ]; then e="\${f##*.}"; touch "$f"; break; fi
 done
 if [ -z "$e" ]; then
-  curl -sfL --max-time 25 -o "$b.tmp" "$1" || { rm -f "$b.tmp"; echo "ERR download"; exit 2; }
+  curl -sfL --proto =https --proto-redir =https --max-filesize 20000000 --max-time 25 -o "$b.tmp" "$1" || { rm -f "$b.tmp"; echo "ERR download"; exit 2; }
   case "$(file -b --mime-type "$b.tmp")" in
     image/png) e=png;; image/jpeg) e=jpg;; image/gif) e=gif;; image/webp) e=webp;; image/svg+xml) e=svg;;
     *) rm -f "$b.tmp"; echo "ERR type"; exit 3;;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PackageManifest Version="2.0.0" xmlns="http://schemas.microsoft.com/developer/vsx-schema/2011">
   <Metadata>
-    <Identity Language="en-US" Id="herdr-review" Version="0.4.0" Publisher="herdr" />
+    <Identity Language="en-US" Id="herdr-review" Version="0.4.1" Publisher="herdr" />
     <DisplayName>Herdr Review</DisplayName>
     <Description xml:space="preserve">Comment lines in files and diffs, then send the review to the agent working in the folder.</Description>
     <Properties>

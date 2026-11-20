@@ -1,0 +1,4 @@
+{
+  "global": { "ctrl-alt-e": "mod.open:excalidraw" },
+  "terminal": { "ctrl-alt-e": "mod.open:excalidraw" }
+}

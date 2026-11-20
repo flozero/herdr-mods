@@ -2,6 +2,7 @@ const WILDCARDS = /[*?[]/;
 
 export async function fetchRules(url) {
   if (!url) return [];
+  if (!/^https:\/\//i.test(url)) throw new Error("review rules: rulesUrl must start with https://");
   const res = await fetch(url);
   if (!res.ok) throw new Error(`review rules: HTTP ${res.status}`);
   return JSON.parse(await res.text()).rule_sets ?? [];

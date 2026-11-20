@@ -46,6 +46,28 @@ os.replace(target + ".tmp", target)
 PY
 }
 
+keep_webview_keys() {
+  mkdir -p "$dest"
+  python3 -I - "$dest/settings.json" "$@" <<'PY'
+import json, os, sys
+
+target, wanted = sys.argv[1], sys.argv[2:]
+settings = json.load(open(target)) if os.path.exists(target) else {}
+have = settings.get("webview_keys")
+keys = list(have) if isinstance(have, list) else ["cmd-q", "cmd-shift-w", "ctrl-tab", "ctrl-shift-tab"]
+for key in wanted:
+    if key not in keys:
+        keys.append(key)
+        print(f"  webview_keys + {key}")
+if have != keys:
+    settings["webview_keys"] = keys
+    with open(target + ".tmp", "w") as f:
+        json.dump(settings, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(target + ".tmp", target)
+PY
+}
+
 install_group() {
   group=$1 mods=$2 group_skills=$3
   shift 3

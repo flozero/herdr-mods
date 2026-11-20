@@ -1,0 +1,4 @@
+{
+  "global": { "ctrl-shift-s": "mod.open:sentry-current", "ctrl-alt-s": "mod.open:sentry-open" },
+  "mod:sentry": { "ctrl-r": "sentry.refresh" }
+}

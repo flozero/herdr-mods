@@ -3,6 +3,7 @@ import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { theme, props, closeOverlay, run, spaces, panes, focused, exec, appHome, home, nextCommand } from "herdr";
 import * as fs from "fs/promises";
 import { TABS, PERIODS, SORTS, target, shortIdIn, queryFor, ago, count } from "./sentry.js";
+import { agentArgv, agentName } from "./agent.js";
 
 const BASE = "mods/sentry";
 const ICON = `${BASE}/icons`;
@@ -19,7 +20,7 @@ const stop = (_e, cx) => cx.stop_propagation();
 export default class Sentry extends View {
   init(_props, cx) {
     this.handle = cx.focus_handle();
-    this.config = { org: "", team: "", environment: "", repo: "", agent: ["claude"], skill: "" };
+    this.config = { org: "", team: "", environment: "", repo: "", agent: ["claude"], agentName: "", skill: "" };
     this.input = InputState.new({ placeholder: "Search, or paste an issue id or link and press Enter" });
     this.input.on("change", (_e, cx) => cx.notify());
     this.input.on("submit", (_e, cx) => this.submit(cx));
@@ -325,10 +326,10 @@ export default class Sentry extends View {
       : `Look into Sentry issue ${issue.shortId}: ${issue.title ?? ""}\n${url}`;
     const space = (repo && spaces().find((s) => s.folder === repo && !s.machine)) || spaces().find((s) => s.active);
     if (space) {
-      run("tab.new", { space: space.id, folder: repo || undefined, name: issue.shortId, argv: this.config.agent, task });
+      run("tab.new", { space: space.id, folder: repo || undefined, name: issue.shortId, argv: agentArgv(this.config), task });
       run("space.select", { id: space.id });
     } else {
-      run("space.new", { folder: repo || home(), tab: issue.shortId, argv: this.config.agent, task });
+      run("space.new", { folder: repo || home(), tab: issue.shortId, argv: agentArgv(this.config), task });
     }
     this.dismiss();
   }
@@ -486,7 +487,7 @@ export default class Sentry extends View {
         issue.status === "resolved" ? t.done : null)))
       .child(div().flex_1())
       .when(Boolean(issue?.shortId), (el) => el
-        .child(this.button(t, "d-claude", "Work with Claude  c", (cx) => this.work(issue, cx)))
+        .child(this.button(t, "d-claude", `Work with ${agentName(this.config)}  c`, (cx) => this.work(issue, cx)))
         .child(this.button(t, "d-assign", "Assign me  a", (cx) => this.assignMe(issue, cx)))
         .child(this.button(t, "d-ignore", "Ignore  ⇧I", (cx) => this.ignore(issue, cx)))
         .child(this.button(t, "d-resolve", "Resolve  ⇧R", (cx) => this.resolve(issue, cx))))
@@ -501,8 +502,8 @@ export default class Sentry extends View {
   footer(t) {
     const s = this.status;
     const hint = this.typing ? "Enter search (an id, short id or link opens the issue) · Esc leave"
-      : this.detail ? "Esc back · o open in Sentry · y copy link · i copy id · c work with Claude · a assign me · ⇧I ignore · ⇧R resolve · ⌘R refresh"
-      : "↑↓ move · Enter open · / search or paste an id · 1–3 / Tab lists · p period · f sort · c work with Claude · a assign me · ⇧I ignore · ⇧R resolve · o Sentry · ⌘R refresh · Esc close";
+      : this.detail ? `Esc back · o open in Sentry · y copy link · i copy id · c work with ${agentName(this.config)} · a assign me · ⇧I ignore · ⇧R resolve · ⌘R refresh`
+      : `↑↓ move · Enter open · / search or paste an id · 1–3 / Tab lists · p period · f sort · c work with ${agentName(this.config)} · a assign me · ⇧I ignore · ⇧R resolve · o Sentry · ⌘R refresh · Esc close`;
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
       .child(div().flex_1().min_w(0).truncate().text_color(color).child(s?.text ?? hint))

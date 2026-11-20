@@ -123,15 +123,38 @@ async function rpc(token, session, message) {
   return { session: res.headers.get("mcp-session-id") ?? session, message: parseRpc(await res.text(), res.headers.get("content-type") ?? "") };
 }
 
-export async function mcp(method, params) {
+async function session() {
   const token = await accessToken();
   const init = await rpc(token, null, { jsonrpc: "2.0", id: 1, method: "initialize",
     params: { protocolVersion: PROTOCOL, capabilities: {}, clientInfo: { name: "herdr-linear", version: "1" } } });
   if (init.message?.error) throw new Error(init.message.error.message);
   await rpc(token, init.session, { jsonrpc: "2.0", method: "notifications/initialized" });
-  const r = await rpc(token, init.session, { jsonrpc: "2.0", id: 2, method, params });
-  if (r.message?.error) throw new Error(r.message.error.message);
-  return r.message?.result;
+  let id = 1;
+  return async (method, params) => {
+    const r = await rpc(token, init.session, { jsonrpc: "2.0", id: ++id, method, params });
+    if (r.message?.error) throw new Error(r.message.error.message);
+    return r.message?.result;
+  };
+}
+
+export async function mcp(method, params) {
+  return (await session())(method, params);
+}
+
+export const READ_ONLY = /^(get|list)_|^whoami$/;
+
+export async function batch(calls, send = null) {
+  if (!Array.isArray(calls) || calls.some((c) => !READ_ONLY.test(String(c?.tool)))) throw new Error("batch takes read-only tools only (get_*, list_*, whoami)");
+  const call = send ?? (await session());
+  return Promise.all(calls.map(async (c) => {
+    try {
+      const result = await call("tools/call", { name: c.tool, arguments: c.args ?? {} });
+      if (result?.isError) { const v = resultValue(result); return { ok: false, error: typeof v === "string" ? v : JSON.stringify(v) }; }
+      return { ok: true, value: resultValue(result) };
+    } catch (e) {
+      return { ok: false, error: String(e?.message ?? e) };
+    }
+  }));
 }
 
 async function readStdin(stream) {
@@ -321,6 +344,7 @@ async function main(argv) {
     console.log(JSON.stringify({ ok: true, value: resultValue(result) }));
     return;
   }
+  if (command === "batch" && rest[0]) { console.log(JSON.stringify({ ok: true, value: await batch(await readArgs(rest[0])) })); return; }
   if (command === "watch" && rest[0]) { console.log(JSON.stringify({ ok: true, value: await watch("comments", rest[0]) })); return; }
   if (command === "watch-mr" && rest[2]) { console.log(JSON.stringify({ ok: true, value: await watch("mr", ...rest) })); return; }
   if (command === "watch-pipeline" && rest[2]) { console.log(JSON.stringify({ ok: true, value: await watch("pipeline", ...rest) })); return; }
@@ -329,7 +353,7 @@ async function main(argv) {
     const every = Number(rest[rest.indexOf("--every") + 1]);
     return watcher({ every: rest.includes("--every") && every > 0 ? every : 120, once: rest.includes("--once") });
   }
-  console.error("usage: linear-me login | logout | status | tools | call <tool> [json | - (stdin) | @file] | watch <ID> | watch-mr <ID> <group/project> <iid> | watch-pipeline <ID> <group/project> <pipeline> | unwatch <ID> [comments|mr|pipeline] | watcher [--every s] [--once]");
+  console.error("usage: linear-me login | logout | status | tools | call <tool> [json | - (stdin) | @file] | batch <[{ tool, args }] json | - | @file> | watch <ID> | watch-mr <ID> <group/project> <iid> | watch-pipeline <ID> <group/project> <pipeline> | unwatch <ID> [comments|mr|pipeline] | watcher [--every s] [--once]");
   process.exitCode = 2;
 }
 

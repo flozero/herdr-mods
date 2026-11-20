@@ -86,60 +86,26 @@ export const isEmpty = (q) => !q.words.length && !q.notWords.length && q.number 
 export const hasText = (q) => q.words.length > 0 || q.number !== null || q.identifier !== null;
 export const textOf = (q) => [...q.words, ...(q.identifier ? [q.identifier.join("-")] : []), ...(q.number !== null ? [String(q.number)] : [])].join(" ");
 
-const any = (list) => (list.length === 1 ? list[0] : { or: list });
-const all = (list) => (list.length === 1 ? list[0] : { and: list });
+const single = (q, field) => {
+  const c = q.conds.filter((x) => x.field === field && !x.neg);
+  return c.length === 1 && c[0].vals.length === 1 ? c[0].vals[0] : null;
+};
 
-// One cond as a Linear IssueFilter. IssueFilter has no "not", so each field says it its own way;
-// a negated assignee also lets unassigned issues through.
-function condFilter(c, me) {
-  const { field, neg, vals } = c;
-  if (field === "state") {
-    const types = vals.filter((v) => v.type).map((v) => v.type);
-    const names = vals.filter((v) => v.name).map((v) => v.name);
-    if (!neg) return any([...(types.length ? [{ state: { type: { in: types } } }] : []), ...names.map((n) => ({ state: { name: { containsIgnoreCase: n } } }))]);
-    return all([...(types.length ? [{ state: { type: { nin: types } } }] : []), ...names.map((n) => ({ state: { name: { notContainsIgnoreCase: n } } }))]);
-  }
-  if (field === "label") {
-    if (!neg) return any(vals.map((v) => ({ labels: { some: { name: { containsIgnoreCase: v } } } })));
-    return all(vals.map((v) => ({ labels: { every: { name: { notContainsIgnoreCase: v } } } })));
-  }
-  if (field === "priority") return { priority: neg ? { nin: vals } : { in: vals } };
-  if (field === "team") return neg ? all(vals.map((k) => ({ team: { key: { neqIgnoreCase: k } } }))) : any(vals.map((k) => ({ team: { key: { eqIgnoreCase: k } } })));
-  // assignee
-  const one = (v) => v.me
-    ? { assignee: { id: neg ? { neq: me ?? "" } : { eq: me ?? "" } } }
-    : neg
-      ? { assignee: { and: [{ name: { notContainsIgnoreCase: v.name } }, { displayName: { notContainsIgnoreCase: v.name } }] } }
-      : { assignee: { or: [{ name: { containsIgnoreCase: v.name } }, { displayName: { containsIgnoreCase: v.name } }] } };
-  return neg ? { or: [{ assignee: { null: true } }, all(vals.map(one))] } : any(vals.map(one));
-}
-
-function tokenParts(q, me) {
-  const parts = q.conds.map((c) => condFilter(c, me));
-  for (const w of q.notWords) parts.push({ title: { notContainsIgnoreCase: w } }, { or: [{ description: { null: true } }, { description: { notContainsIgnoreCase: w } }] });
-  return parts;
-}
-const combine = (parts) => parts.length === 0 ? {} : parts.length === 1 ? parts[0] : { and: parts };
-const containsWord = (w) => [{ title: { containsIgnoreCase: w } }, { description: { containsIgnoreCase: w } }];
-
-// The server filter. Without a positive `#KEY` it's limited to every team I belong to.
-export function serverFilter(q, teamIds, me) {
-  const parts = q.words.map((w) => ({ or: containsWord(w) }));
-  if (q.number !== null) parts.push({ or: [...containsWord(String(q.number)), { number: { eq: q.number } }] });
-  if (q.identifier) {
-    const [key, n] = q.identifier;
-    // Each condition its own object: inside `or`, Linear drops all but one field of an object
-    // ({team, number} matched the whole team).
-    parts.push({ or: [{ and: [{ team: { key: { eqIgnoreCase: key } } }, { number: { eq: n } }] }, ...containsWord(`${key}-${n}`)] });
-  }
-  parts.push(...tokenParts(q, me));
-  if (!q.conds.some((c) => c.field === "team" && !c.neg) && teamIds.length) parts.push({ team: { id: { in: teamIds } } });
-  return combine(parts);
-}
-
-export function tokenFilter(q, me) {
-  const p = tokenParts(q, me);
-  return p.length ? combine(p) : null;
+export function searchCalls(q, limit = 50) {
+  const calls = [];
+  if (q.identifier) calls.push({ tool: "get_issue", args: { id: q.identifier.join("-") } });
+  const text = [...q.words, ...(q.number !== null ? [String(q.number)] : [])].join(" ");
+  if (q.identifier && !text && !q.conds.length) return calls;
+  const args = { limit, orderBy: "updatedAt" };
+  if (text) args.query = text;
+  const team = single(q, "team"), state = single(q, "state"), label = single(q, "label"), who = single(q, "assignee"), priority = single(q, "priority");
+  if (team) args.team = team;
+  if (state) args.state = state.type ?? state.name;
+  if (label) args.label = label;
+  if (who) args.assignee = who.me ? "me" : who.name;
+  if (priority !== null) args.priority = priority;
+  calls.push({ tool: "list_issues", args });
+  return calls;
 }
 
 function condMatch(issue, c, viewerId) {

@@ -10,7 +10,7 @@ const COPIES = [
   { from: "mods/tabs", to: "mods/my-tabs" },
   { from: "layouts/main.json", to: "layouts/my-main.json" },
 ];
-const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix"];
+const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix", "configurable-agent"];
 const STACKS = ["", "0.1.16/"];
 const LAYOUT = "my-main";
 

@@ -52,7 +52,12 @@ dir="$1"; port="$2"; version="$3"
 bin="$dir/code-server-$version-macos-arm64/bin/code-server"
 curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" 2>/dev/null && exit 0
 if [ ! -x "$bin" ]; then
-  curl -fsSL "https://github.com/coder/code-server/releases/download/v$version/code-server-$version-macos-arm64.tar.gz" | tar xz -C "$dir" || exit 1
+  tmp=$(mktemp -d "$dir/download.XXXXXX") || exit 1
+  curl -fsSL --proto =https --proto-redir =https -o "$tmp/code-server.tar.gz" "https://github.com/coder/code-server/releases/download/v$version/code-server-$version-macos-arm64.tar.gz" &&
+    tar xzf "$tmp/code-server.tar.gz" -C "$tmp" && mv "$tmp/code-server-$version-macos-arm64" "$dir/"
+  ok=$?
+  rm -rf "$tmp"
+  [ "$ok" -eq 0 ] || exit 1
 fi
 nohup "$bin" --bind-addr "127.0.0.1:$port" --auth none --user-data-dir "$dir/data" --extensions-dir "$dir/extensions" \\
   --disable-telemetry --disable-update-check --disable-workspace-trust --disable-getting-started-override \\
@@ -103,8 +108,9 @@ const readJson = async (path) => {
 };
 
 async function extensions(folder) {
-  const mine = (await readJson(`${appHome()}/mods/vscode/config.json`))?.extensions;
-  const project = (await readJson(`${folder}/.vscode/extensions.json`))?.recommendations;
+  const config = (await readJson(`${appHome()}/mods/vscode/config.json`)) ?? {};
+  const mine = config.extensions;
+  const project = config.installRecommended === true ? (await readJson(`${folder}/.vscode/extensions.json`))?.recommendations : null;
   const ids = [...(Array.isArray(mine) ? mine : []), ...(Array.isArray(project) ? project : [])].map(String);
   return [...new Map(ids.map((id) => [id.toLowerCase(), id])).values()];
 }
@@ -142,7 +148,7 @@ export default class VsCode extends View {
 
   render() {
     const t = theme();
-    if (this.url) return webview(this.url).id("vscode").size_full();
+    if (this.url) return webview(this.url, { keep: true }).id("vscode").size_full();
     return v_flex().size_full().items_center().justify_center().bg(t.background).text_color(t.dim)
       .child(div().child(this.error ?? "Starting VS Code…"));
   }

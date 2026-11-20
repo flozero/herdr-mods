@@ -9,6 +9,7 @@ import { reviewMessage, threadsMessage, branchDiff, worktreeStamp, draftsQuestio
 import { fetchRules, matchRules } from "./rules.js";
 import { editPoint, mentionAt, rankPeople, insertMention } from "./mention.js";
 import { branchCheckout, installedEditors, openIn, worktreeSetup, HERDR_EDITOR } from "./editor.js";
+import { agentArgv, agentName, askArgv } from "./agent.js";
 
 
 const MONO = "JetBrains Mono";
@@ -38,7 +39,6 @@ const DENY = [
   "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git commit:*)", "Bash(git push:*)",
   "Bash(git reset:*)", "Bash(git stash:*)", "Bash(git rebase:*)", "Bash(git merge:*)",
 ];
-const CLAUDE = ["claude", "--settings", JSON.stringify({ permissions: { deny: DENY } })];
 const TABS = ["description", "changes", "comments", "review"];
 const LIST_TABS = ["mine", "review", "ignored", "merged"];
 const LIST_LABEL = { mine: "Mine", review: "To review", ignored: "Ignored", merged: "Merged" };
@@ -54,6 +54,7 @@ const LOCAL_EVERY = 3000;
 const FILE_STATE = [["uncommitted", "not committed", "accent"], ["committed", "committed", "muted"], ["pushed", "pushed", "done"]];
 const GENERAL = { kind: "general" };
 const stop = (_e, cx) => cx.stop_propagation();
+const safeBranch = (b) => (/^[\w./-]+$/.test(String(b ?? "")) ? b : "<the source branch from glab mr view>");
 
 function ago(iso) {
   const m = Math.max(0, Math.floor((Date.now() - Date.parse(iso ?? "")) / 60000));
@@ -105,6 +106,7 @@ export default class GitlabReview extends View {
     this.fixer = null;
     this.notes = [];
     this.claude = null;
+    this.config = {};
     this.briefed = new Set();
     this.ignored = {};
     this.seen = {};
@@ -604,7 +606,7 @@ export default class GitlabReview extends View {
     cx.spawn(async (cx) => {
       try {
         await this.handToClaude(threadsMessage({ iid: d.mr.iid, branch: d.mr.source_branch }, threads, d.files), cx);
-        this.say(`Sent ${threads.length} thread${threads.length > 1 ? "s" : ""} to Claude, on the right`, cx, "success");
+        this.say(`Sent ${threads.length} thread${threads.length > 1 ? "s" : ""} to ${this.agentName()}, on the right`, cx, "success");
       } catch (e) {
         this.say(`Couldn't send: ${e?.message ?? e}`, cx, "error");
       } finally {
@@ -709,7 +711,7 @@ export default class GitlabReview extends View {
     this.draft.set_value("");
     this.target = GENERAL;
     this.saveNotes(cx);
-    if (!quiet) this.say(`Added to your review: ${this.notes.length} pending · a sends it to Claude${this.remote ? ", or Post on GitLab" : ""}`, cx, "success");
+    if (!quiet) this.say(`Added to your review: ${this.notes.length} pending · a sends it to ${this.agentName()}${this.remote ? ", or Post on GitLab" : ""}`, cx, "success");
     cx.notify();
   }
 
@@ -798,7 +800,7 @@ export default class GitlabReview extends View {
         await this.handToClaude(reviewMessage({ branch: d.mr.source_branch, base: d.base }, sent, d.files, d.threads), cx);
         this.notes = this.notes.filter((n) => !sent.includes(n));
         this.saveNotes(cx);
-        this.say(`Sent ${sent.length} comment${sent.length > 1 ? "s" : ""} to Claude, on the right`, cx, "success");
+        this.say(`Sent ${sent.length} comment${sent.length > 1 ? "s" : ""} to ${this.agentName()}, on the right`, cx, "success");
       } catch (e) {
         this.say(`Couldn't send: ${e?.message ?? e}`, cx, "error");
       } finally {
@@ -907,8 +909,8 @@ export default class GitlabReview extends View {
 
   async loadRules(cx) {
     try {
-      const config = JSON.parse((await fs.readFile(`${appHome()}/mods/gitlab-review/config.json`, "utf8").catch(() => null)) ?? "{}");
-      this.rules = await fetchRules(config.rulesUrl);
+      this.config = JSON.parse((await fs.readFile(`${appHome()}/mods/gitlab-review/config.json`, "utf8").catch(() => null)) ?? "{}");
+      this.rules = await fetchRules(this.config.rulesUrl);
       this.rulesError = null;
     }
     catch (e) { this.rulesError = String(e?.message ?? e); }
@@ -931,7 +933,7 @@ export default class GitlabReview extends View {
     const mr = d.mr;
     const head = [
       `Review merge request !${mr.iid} against the team review rules below.`,
-      `Read the changes with \`glab mr diff ${mr.iid}\`, and whole files with \`git fetch origin ${mr.source_branch}\` then \`git show origin/${mr.source_branch}:<path>\`.`,
+      `Read the changes with \`glab mr diff ${mr.iid}\`, and whole files with \`git fetch origin ${safeBranch(mr.source_branch)}\` then \`git show origin/${safeBranch(mr.source_branch)}:<path>\`.`,
       "For each rule, list every violation as `- path:line: <rule title>: why`, then cite the rule page. Write `No violations` for a rule with none. Findings only, no summary.",
       "Rules in mode `subagent` deserve their own sub-agent if you can run one.",
       "Do not post anything to GitLab: I add the findings I keep myself.",
@@ -950,7 +952,7 @@ export default class GitlabReview extends View {
     if (!d) return;
     if (!this.rules) { this.say(this.rulesError ? `Review rules unavailable: ${this.rulesError}` : "Review rules are still loading", cx, "error"); return; }
     if (!this.rulesFor(d).length) { this.say("No team review rule applies to the files of this merge request", cx); return; }
-    this.askClaude(cx, d, this.rulesPrompt(d), "Asked Claude to review against the rules");
+    this.askClaude(cx, d, this.rulesPrompt(d), `Asked ${this.agentName()} to review against the rules`);
   }
 
   async findReplies(cx, mrs) {
@@ -1196,7 +1198,7 @@ export default class GitlabReview extends View {
       openOverlay({ mod: "linear", kind: "window", key: "linear-link", width: 980, height: 0.8, props: { open: linear[1].toUpperCase() } });
       return;
     }
-    cx.open_url(url);
+    if (/^https?:\/\//i.test(String(url))) cx.open_url(url);
   }
 
   editDescription(cx) {
@@ -1566,7 +1568,7 @@ export default class GitlabReview extends View {
   askAboutReview(cx) {
     const d = this.details[this.iid];
     if (!d?.drafts.length) { this.say("Your review is empty: add comments first (⌘↵)", cx); return; }
-    this.askClaude(cx, d, draftsQuestion({ iid: d.mr.iid }, d.drafts, this.allFiles(d), d.threads), "Asked Claude about your review");
+    this.askClaude(cx, d, draftsQuestion({ iid: d.mr.iid }, d.drafts, this.allFiles(d), d.threads), `Asked ${this.agentName()} about your review`);
   }
 
   brief(mr) {
@@ -1577,10 +1579,14 @@ export default class GitlabReview extends View {
       `Branch ${mr.source_branch} into ${mr.target_branch}, by ${who(mr.author)}.`,
       "",
       "Rules: answer me here, in this terminal. Never post comments, approvals or anything else to GitLab, never edit files, and never check out, switch or commit.",
-      `Read what you need with \`glab mr view ${mr.iid} --comments\`, \`glab mr diff ${mr.iid}\`, and \`git fetch origin ${mr.source_branch}\` then \`git show origin/${mr.source_branch}:<path>\` for whole files.`,
+      `Read what you need with \`glab mr view ${mr.iid} --comments\`, \`glab mr diff ${mr.iid}\`, and \`git fetch origin ${safeBranch(mr.source_branch)}\` then \`git show origin/${safeBranch(mr.source_branch)}:<path>\` for whole files.`,
       ...(rules.length ? ["", "Team review rules that apply to this merge request (I may ask you to review against them):",
         ...rules.map(({ rule, globs }) => `- ${rule.page_title}${rule.page_url ? ` (${rule.page_url})` : ""}: ${globs.join(", ")}`)] : []),
     ].join("\n");
+  }
+
+  agentName() {
+    return agentName(this.config);
   }
 
   claudeAlive() {
@@ -1618,7 +1624,7 @@ export default class GitlabReview extends View {
       return;
     }
     const name = `branch-review-${Date.now().toString(36)}`;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", "claude", text]);
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...agentArgv(this.config), text]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
     this.fixer = JSON.parse(r.stdout).address ?? name;
     await this.showRight(cx, this.fixer);
@@ -1626,7 +1632,7 @@ export default class GitlabReview extends View {
 
   async launchClaude(text) {
     const name = `mr-review-${Date.now().toString(36)}`;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...CLAUDE, text]);
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...askArgv(this.config, DENY), text]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
     return JSON.parse(r.stdout).address ?? name;
   }
@@ -1636,7 +1642,7 @@ export default class GitlabReview extends View {
     if (!d || this.local) return;
     if (!q) { this.say("Type a question first", cx); return; }
     const ctx = this.context();
-    if (this.askClaude(cx, d, ctx ? `${q}\n\n${ctx}` : q, "Asked Claude")) this.draft.set_value("");
+    if (this.askClaude(cx, d, ctx ? `${q}\n\n${ctx}` : q, `Asked ${this.agentName()}`)) this.draft.set_value("");
   }
 
   askClaude(cx, d, question, done) {
@@ -1662,7 +1668,7 @@ export default class GitlabReview extends View {
           : `${done}, still starting in the background · g to show its pane`, cx, "success");
       } catch (e) {
         this.askedAt = 0;
-        this.say(`Couldn't reach Claude: ${e?.message ?? e}`, cx, "error");
+        this.say(`Couldn't reach ${this.agentName()}: ${e?.message ?? e}`, cx, "error");
       }
       cx.notify();
     });
@@ -1696,11 +1702,11 @@ export default class GitlabReview extends View {
         }
         const shown = panes().some((p) => p.terminal === term);
         if (shown) run("pane.focus", { terminal: term });
-        this.say(shown ? (this.local ? "Claude is on the right: a sends your review there too" : "Claude is on the right: ⌥↵ questions and rule reviews go there too")
-          : "Claude is starting in the background · g to show its pane", cx, "success");
+        this.say(shown ? (this.local ? `${this.agentName()} is on the right: a sends your review there too` : `${this.agentName()} is on the right: ⌥↵ questions and rule reviews go there too`)
+          : `${this.agentName()} is starting in the background · g to show its pane`, cx, "success");
       } catch (e) {
         this.askedAt = 0;
-        this.say(`Couldn't reach Claude: ${e?.message ?? e}`, cx, "error");
+        this.say(`Couldn't reach ${this.agentName()}: ${e?.message ?? e}`, cx, "error");
       }
       cx.notify();
     });
@@ -2062,7 +2068,7 @@ export default class GitlabReview extends View {
       .when(this.sending, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Sending…")))
       .when(this.notes.length > 0, (el) => el.child(this.button(t, "lc-discard", "Discard all", (cx) => this.discard(cx), false, !this.sending)))
       .when(Boolean(this.remote), (el) => el.child(this.button(t, "lc-post", n ? `Post ${n} on GitLab` : "Post on GitLab", (cx) => this.postNotes(cx), false, n > 0 && !this.sending)))
-      .child(this.button(t, "lc-send", n ? `Send ${n} to Claude  a` : "Send to Claude  a", (cx) => this.sendLocal(cx), true, n > 0 && !this.sending));
+      .child(this.button(t, "lc-send", n ? `Send ${n} to ${this.agentName()}  a` : `Send to ${this.agentName()}  a`, (cx) => this.sendLocal(cx), true, n > 0 && !this.sending));
   }
 
   header(t, d) {
@@ -2161,10 +2167,10 @@ export default class GitlabReview extends View {
     const s = this.flash ?? this.status;
     const hint = this.descFocused ? "⌘↵ save the description · Esc leave the editor (Cancel drops the changes)"
       : this.composing && this.local ? "⌘↵ add to your review · Esc leave"
-      : this.composing ? "⌘↵ add to your review (pending) · ⌥↵ ask Claude (private) · Esc leave"
-      : this.local && !this.searchFocused ? "1–4 / Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, ← back) · c comment, ⌘↵ add to your review · a send the review to Claude · s split · d edit the description · ⇧D draft/ready · e editor · / search · ⌘R refresh"
+      : this.composing ? `⌘↵ add to your review (pending) · ⌥↵ ask ${this.agentName()} (private) · Esc leave`
+      : this.local && !this.searchFocused ? `1–4 / Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, ← back) · c comment, ⌘↵ add to your review · a send the review to ${this.agentName()} · s split · d edit the description · ⇧D draft/ready · e editor · / search · ⌘R refresh`
       : this.searchFocused ? "Type to filter what's loaded · Enter keep · Esc clear"
-      : this.iid ? "/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask Claude · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back"
+      : this.iid ? `/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask ${this.agentName()} · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back`
       : this.picked().length > 1 ? `${this.picked().length} selected · i ignore or restore them all · Esc unselect`
       : "1–4 / Tab ⇧Tab lists · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
@@ -2185,7 +2191,7 @@ export default class GitlabReview extends View {
   linkChip(t, id, text, color, url) {
     return h_flex().id(`lc-${id}`).flex_none().h(20).px(8).items_center().rounded(10).border_1().border_color(color ?? t.border)
       .text_size(11).text_color(color ?? t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
-      .on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(url))
+      .on_mouse_down("left", stop).on_click((_e, cx) => this.openLink(url, cx))
       .child(text);
   }
 
@@ -2350,7 +2356,7 @@ export default class GitlabReview extends View {
       .when(Boolean(note), (el) => el.child(div().text_size(12).text_color(t.dim).child(note)))
       .children(matches.map(({ rule, files }) => h_flex().id(`sr-${rule.page_id}`).w_full().gap(6).items_center().text_size(12)
         .child(div().flex_1().min_w(0).truncate().text_color(rule.page_url ? t.accent : t.foreground)
-          .when(Boolean(rule.page_url), (el) => el.cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(rule.page_url)))
+          .when(Boolean(rule.page_url), (el) => el.cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => this.openLink(rule.page_url, cx)))
           .child(rule.page_title))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(`${files.length} file${files.length > 1 ? "s" : ""}`))))
       .when(matches.length > 0, (el) => el.child(h_flex().pt(4).child(this.button(t, "sr-run", `Review against ${matches.length} rule${matches.length > 1 ? "s" : ""}`, (cx) => this.reviewRules(cx), true)))));
@@ -2371,7 +2377,7 @@ export default class GitlabReview extends View {
         .when(Boolean(this.draftable()), (el) => el.child(h_flex().child(this.draftButton(t))))
       : none(d.status?.pushed ? "No merge request for this branch yet" : "Not pushed yet, no merge request");
     const actions = h_flex().w_full().gap(6).flex_wrap()
-      .child(this.button(t, "sa-claude", "Ask Claude  g", (cx) => this.openClaude(cx), true))
+      .child(this.button(t, "sa-claude", `Ask ${this.agentName()}  g`, (cx) => this.openClaude(cx), true))
       .when(Boolean(mr.web_url), (el) => el.child(this.button(t, "sa-web", "Browser  o", (cx) => cx.open_url(mr.web_url))))
       .child(this.editorButton(t, "top_left"))
       .when(!this.local, (el) => el.child(this.button(t, "sa-ignore", this.ignored[this.iid] ? "Restore  i" : "Ignore  i", (cx) => this.toggleIgnore(this.iid, cx))))
@@ -2469,13 +2475,13 @@ export default class GitlabReview extends View {
       .child(div().text_size(11.5).text_color(t.dim).child(!this.rules ? (this.rulesError ? `unavailable: ${this.rulesError}` : "loading…")
         : matches.length ? `${matches.length} apply to this merge request` : "none applies to these files"))
       .child(div().flex_1())
-      .when(matches.length > 0, (el) => el.child(this.button(t, "rv-rules", "Ask Claude to review against them", (cx) => this.reviewRules(cx), true)));
+      .when(matches.length > 0, (el) => el.child(this.button(t, "rv-rules", `Ask ${this.agentName()} to review against them`, (cx) => this.reviewRules(cx), true)));
     return v_flex().gap(8).p(12).rounded(8).border_1().border_color(t.border)
       .child(head)
       .children(matches.map(({ rule, globs, files }) => h_flex().id(`rule-${rule.page_id}`).gap(8).items_center().text_size(12)
         .child(this.chip(t, rule.mode))
         .child(div().flex_none().text_color(rule.page_url ? t.accent : t.foreground).cursor_pointer()
-          .when(Boolean(rule.page_url), (el) => el.on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(rule.page_url)))
+          .when(Boolean(rule.page_url), (el) => el.on_mouse_down("left", stop).on_click((_e, cx) => this.openLink(rule.page_url, cx)))
           .child(rule.page_title))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).font_family(MONO)
           .child(`${globs.join(", ")} · ${files.length} file${files.length > 1 ? "s" : ""}`))));
@@ -2489,7 +2495,7 @@ export default class GitlabReview extends View {
       const notes = q ? this.notes.filter((x) => has(x.note, q) || has(x.position?.new_path, q)) : this.notes;
       return view
         .child(div().text_size(12).font_semibold().child(`Your review · ${notes.length}`))
-        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to Claude (a)${this.remote ? " or Post on GitLab" : ""}`)))
+        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to ${this.agentName()} (a)${this.remote ? " or Post on GitLab" : ""}`)))
         .children(notes.map((x) => this.draftView(t, d, x, true)))
         .when(list.length > 0, (el) => el.child(div().pt(8).text_size(12).font_semibold().child(`Pending on GitLab · ${list.length}`)))
         .children(list.map((x) => this.draftView(t, d, x)));
@@ -2520,7 +2526,7 @@ export default class GitlabReview extends View {
       .when(!mine && Boolean(d.approvals?.approvals_left), (el) => el.child(this.chip(t, `${d.approvals.approvals_left} approval${d.approvals.approvals_left > 1 ? "s" : ""} left`)))
       .child(div().flex_1())
       .when(d.drafts.length > 0, (el) => el.child(this.button(t, "rv-discard", "Discard all", (cx) => this.discard(cx), false, !busy)))
-      .when(d.drafts.length > 0, (el) => el.child(this.button(t, "rv-claude", `Ask Claude about these ${d.drafts.length}`, (cx) => this.askAboutReview(cx), false, !busy)))
+      .when(d.drafts.length > 0, (el) => el.child(this.button(t, "rv-claude", `Ask ${this.agentName()} about these ${d.drafts.length}`, (cx) => this.askAboutReview(cx), false, !busy)))
       .when(busy, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Submitting…")))
       .child(this.button(t, "rv-changes", n ? `Submit ${n} + request changes` : "Request changes", go("changes"), false, !busy))
       .child(mine
@@ -2541,7 +2547,7 @@ export default class GitlabReview extends View {
       return v_flex().id("glr-desc").flex_1().min_h(0).p(16).pb(120).gap(10).overflow_y_scrollbar()
         .child(div().text_size(14).font_semibold().child(st?.pushed ? "No merge request for this branch yet" : "Not pushed yet, no merge request"))
         .child(div().text_size(12.5).text_color(t.muted).child(`${d.mr.source_branch} against ${d.base ?? "master"}: ${d.files.length} file${d.files.length === 1 ? "" : "s"} changed${st?.ahead ? `, ${st.ahead} commit${st.ahead > 1 ? "s" : ""}` : ""}${st?.dirty ? `, ${st.dirty} not committed` : ""}.`))
-        .child(div().text_size(12).text_color(t.dim).child("Comments on the code go to Claude here (c, then a). Once the branch has a merge request, its description, threads and review show up in this same view."));
+        .child(div().text_size(12).text_color(t.dim).child(`Comments on the code go to ${this.agentName()} here (c, then a). Once the branch has a merge request, its description, threads and review show up in this same view.`));
     }
     if (this.descEdit?.iid === d.mr.iid) return this.descriptionEditor(t, d);
     const q = this.q();
@@ -2618,7 +2624,7 @@ export default class GitlabReview extends View {
       .child(h_flex().gap(6).items_center()
         .when(resolved, (el) => el.child(this.chip(t, "resolved", t.done)))
         .child(div().flex_1())
-        .when(this.local, (el) => el.child(this.button(t, `th-claude-${x.id}`, "→ Claude", (cx) => this.sendThreads([x], cx), false, !this.sending)))
+        .when(this.local, (el) => el.child(this.button(t, `th-claude-${x.id}`, `→ ${this.agentName()}`, (cx) => this.sendThreads([x], cx), false, !this.sending)))
         .child(this.button(t, `th-reply-${x.id}`, "Reply / ask", (cx) => this.aim({ kind: "reply", discussionId: x.id, who: who(first.author) }, cx))));
   }
 
@@ -2634,7 +2640,7 @@ export default class GitlabReview extends View {
     return v_flex().id("glr-comments").flex_1().min_h(0).p(16).pb(120).gap(12).overflow_y_scrollbar()
       .when(this.local && open.length > 0, (el) => el.child(h_flex().gap(8).items_center()
         .child(div().flex_1().text_size(12).text_color(t.muted).child(`${open.length} unresolved thread${open.length > 1 ? "s" : ""}`))
-        .child(this.button(t, "th-claude-all", `Send the ${open.length} unresolved to Claude`, (cx) => this.sendThreads(open, cx), true, !this.sending))))
+        .child(this.button(t, "th-claude-all", `Send the ${open.length} unresolved to ${this.agentName()}`, (cx) => this.sendThreads(open, cx), true, !this.sending))))
       .children(threads.map((x) => this.threadView(t, d, x)));
   }
 
@@ -2832,7 +2838,7 @@ export default class GitlabReview extends View {
       .child(div().id("c-draft").w_full().min_w(0).rounded(8).border_1().border_color(this.composing ? t.accent : t.border).bg(t.background)
         .on_mouse_down("left", stop).child(Textarea.new(this.draft).w_full()))
       .child(h_flex().gap(8).items_center().justify_end()
-        .when(!this.local, (el) => el.child(this.button(t, "c-ask", "Ask Claude  ⌥↵", (cx) => this.ask(cx), false, !empty)))
+        .when(!this.local, (el) => el.child(this.button(t, "c-ask", `Ask ${this.agentName()}  ⌥↵`, (cx) => this.ask(cx), false, !empty)))
         .when(!this.local, (el) => el.child(this.button(t, "c-post", "Post now", (cx) => this.post(cx), false, !empty && !this.sending)))
         .when(this.closable()?.state === "opened", (el) => {
           const withText = !this.local && this.target === GENERAL && !empty;

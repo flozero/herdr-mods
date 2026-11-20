@@ -1,0 +1,4 @@
+{
+  "global": { "ctrl-alt-g": "mod.open:gitlab-review-open" },
+  "mod:gitlab-review": { "alt-enter": "gitlab-review.ask", "ctrl-r": "gitlab-review.refresh" }
+}

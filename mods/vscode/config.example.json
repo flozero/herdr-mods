@@ -2,6 +2,7 @@
   "agent": [
     "claude"
   ],
+  "installRecommended": false,
   "python": "${workspaceFolder}/venv/bin/python",
   "extensions": [
     "ms-python.python",
