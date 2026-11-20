@@ -8,6 +8,8 @@
 
 VS Code (code-server, downloaded on first use) in a pane beside the focused one, on its folder. The `herdr-review` extension comes with it: comment lines in files and diffs (`cmd-alt-c`), then send the review (`cmd-alt-enter`) to the agent working in the repository, or to a new one.
 
+Popups, dialogs and Herdr windows (the picker, excalidraw…) hide the web view while they cover it: a native web view is always drawn above the rest of the window.
+
 The web view uses `webview(url, { keep: true })`, so code-server isn't reloaded when you switch tabs. The fork's web view only loads `http` and `https` URLs.
 
 ## Keys
