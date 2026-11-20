@@ -1,0 +1,1 @@
+{ "place": "none", "title": "GitLab review", "focusable": true, "overlay": { "kind": "window", "key": "gitlab-review", "keep": true, "width": 1180, "height": 0.85 } }

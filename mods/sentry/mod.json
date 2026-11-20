@@ -1,0 +1,1 @@
+{ "place": "none", "title": "Sentry", "overlay": { "kind": "window", "key": "sentry", "width": 1000, "height": 0.8 } }

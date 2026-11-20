@@ -1,0 +1,209 @@
+{
+  "name": "herdr-review",
+  "displayName": "Herdr Review",
+  "description": "Comment lines in files and diffs, then send the review to the agent working in the folder.",
+  "version": "0.4.0",
+  "publisher": "herdr",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "herdrReview.start",
+        "title": "Comment for the agent",
+        "category": "Herdr Review",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "herdrReview.add",
+        "title": "Add Comment",
+        "category": "Herdr Review"
+      },
+      {
+        "command": "herdrReview.delete",
+        "title": "Delete Comment",
+        "category": "Herdr Review",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "herdrReview.send",
+        "title": "Send Review to Agent",
+        "category": "Herdr Review",
+        "icon": "$(send)"
+      },
+      {
+        "command": "herdrReview.clear",
+        "title": "Discard Review",
+        "category": "Herdr Review",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "herdrReview.edit",
+        "title": "Edit Comment",
+        "category": "Herdr Review",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "herdrReview.save",
+        "title": "Save",
+        "category": "Herdr Review"
+      },
+      {
+        "command": "herdrReview.cancel",
+        "title": "Cancel",
+        "category": "Herdr Review"
+      },
+      {
+        "command": "herdrReview.refreshBranch",
+        "title": "Refresh",
+        "category": "Herdr Review",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "herdrReview.openChange",
+        "title": "Open Change",
+        "category": "Herdr Review"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "herdrReview.start",
+        "key": "ctrl+alt+c",
+        "mac": "cmd+alt+c",
+        "when": "editorTextFocus"
+      },
+      {
+        "command": "herdrReview.send",
+        "key": "ctrl+enter",
+        "mac": "cmd+alt+enter",
+        "when": "herdrReview.hasComments"
+      }
+    ],
+    "menus": {
+      "comments/commentThread/context": [
+        {
+          "command": "herdrReview.add",
+          "group": "inline",
+          "when": "commentController == herdr-review"
+        }
+      ],
+      "comments/comment/title": [
+        {
+          "command": "herdrReview.edit",
+          "group": "inline@1",
+          "when": "commentController == herdr-review && !commentIsEditing"
+        },
+        {
+          "command": "herdrReview.delete",
+          "group": "inline@2",
+          "when": "commentController == herdr-review && !commentIsEditing"
+        }
+      ],
+      "scm/title": [
+        {
+          "command": "herdrReview.send",
+          "group": "navigation",
+          "when": "herdrReview.hasComments"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "herdrReview.send",
+          "group": "navigation",
+          "when": "herdrReview.hasComments"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "herdrReview.add",
+          "when": "false"
+        },
+        {
+          "command": "herdrReview.delete",
+          "when": "false"
+        },
+        {
+          "command": "herdrReview.edit",
+          "when": "false"
+        },
+        {
+          "command": "herdrReview.save",
+          "when": "false"
+        },
+        {
+          "command": "herdrReview.cancel",
+          "when": "false"
+        },
+        {
+          "command": "herdrReview.openChange",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "herdrReview.start",
+          "group": "0_herdr",
+          "when": "editorTextFocus"
+        }
+      ],
+      "comments/comment/context": [
+        {
+          "command": "herdrReview.cancel",
+          "group": "inline@1",
+          "when": "commentController == herdr-review"
+        },
+        {
+          "command": "herdrReview.save",
+          "group": "inline@2",
+          "when": "commentController == herdr-review"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "herdrReview.refreshBranch",
+          "group": "navigation",
+          "when": "view == herdrReview.branch"
+        },
+        {
+          "command": "herdrReview.send",
+          "group": "navigation",
+          "when": "view == herdrReview.branch && herdrReview.hasComments"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Herdr Review",
+      "properties": {
+        "herdrReview.agent": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "claude"
+          ],
+          "description": "The agent to start, in a pane below, when none works in the repository. The review is its last argument."
+        },
+        "herdrReview.base": {
+          "type": "string",
+          "default": "",
+          "description": "The branch Branch Changes compares against. Empty: origin's default branch."
+        }
+      }
+    },
+    "views": {
+      "scm": [
+        {
+          "id": "herdrReview.branch",
+          "name": "Branch Changes"
+        }
+      ]
+    }
+  }
+}

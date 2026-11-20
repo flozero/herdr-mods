@@ -1,0 +1,4 @@
+{
+  "global": { "cmd-s": "mod.open:sentry-current", "cmd-shift-s": "mod.open:sentry-open" },
+  "mod:sentry": { "cmd-r": "sentry.refresh" }
+}

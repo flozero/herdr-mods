@@ -1,0 +1,41 @@
+diff --git a/layouts/main.json b/layouts/main.json
+index 32d41bc..0fc2288 100644
+--- a/layouts/main.json
++++ b/layouts/main.json
+@@ -16,7 +16,8 @@
+     "color": "border"
+   },
+   "floating": [
+-    { "id": "patcher", "content": { "mod": "patcher" }, "edge": "bottom", "align": "end" }
++    { "id": "patcher", "content": { "mod": "patcher" }, "edge": "bottom", "align": "end" },
++    { "id": "worktree-sync", "content": { "mod": "worktree-sync" }, "edge": "bottom", "align": "end" }
+   ],
+   "children": [
+     {
+diff --git a/mods/worktree/main.js b/mods/worktree/main.js
+index f7e588b..12e9ab1 100644
+--- a/mods/worktree/main.js
++++ b/mods/worktree/main.js
+@@ -120,6 +120,14 @@ async function repoOf(folder, on) {
+   return { top: top.out, main, name: main.split("/").pop(), linked: main !== top.out };
+ }
+ 
++import { shared, setShared } from "herdr";
++function claim(branch) {
++  if (!branch) return;
++  const now = Date.now();
++  const claims = Object.entries(shared("worktree-sync.claims") ?? {}).filter(([, at]) => now - at < 600_000);
++  setShared("worktree-sync.claims", Object.fromEntries([...claims, [branch, now]]));
++}
++
+ export default class Worktree extends View {
+   init(_props, cx) {
+     this.on = this.space()?.machine;
+@@ -191,6 +199,7 @@ export default class Worktree extends View {
+     this.busy = true;
+     this.error = "";
+     cx.notify();
++    if (props().action !== "remove") claim(this.text.trim());
+     try { this.error = props().action === "remove" ? await this.remove() : await this.create(); }
+     catch (error) { this.error = String(error); }
+     this.busy = false;

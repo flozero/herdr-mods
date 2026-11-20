@@ -1,0 +1,7 @@
+{
+  "global": {
+    "cmd-shift-n": "mod.open:worktree-new",
+    "cmd-shift-o": "mod.open:worktree-open",
+    "cmd-alt-p": "mod.open:patcher"
+  }
+}

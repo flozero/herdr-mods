@@ -1,0 +1,4 @@
+{
+  "global": { "cmd-i": "mod.open:linear-current", "cmd-shift-i": "mod.open:linear-open" },
+  "mod:linear": { "cmd-r": "linear.refresh" }
+}

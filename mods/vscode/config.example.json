@@ -1,0 +1,26 @@
+{
+  "agent": [
+    "claude"
+  ],
+  "python": "${workspaceFolder}/venv/bin/python",
+  "extensions": [
+    "ms-python.python",
+    "astral-sh.ty",
+    "charliermarsh.ruff",
+    "Vue.volar",
+    "dbaeumer.vscode-eslint",
+    "esbenp.prettier-vscode",
+    "bradlc.vscode-tailwindcss",
+    "rust-lang.rust-analyzer",
+    "golang.Go",
+    "opentofu.vscode-opentofu",
+    "redhat.vscode-yaml",
+    "tamasfe.even-better-toml",
+    "docker.docker",
+    "unifiedjs.vscode-mdx",
+    "BeardedBear.beardedtheme"
+  ],
+  "settings": {
+    "workbench.colorTheme": "Bearded Theme Milkshake Mango"
+  }
+}
