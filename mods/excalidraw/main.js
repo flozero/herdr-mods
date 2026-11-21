@@ -5202,9 +5202,19 @@ var Excalidraw = class extends View {
   herdrZoom() {
     return Number(settings()?.zoom) || 1;
   }
-  /** GPUI pixels (paths, pointer positions) per scene unit. */
+  /** Real pixels (pointer positions, wheel deltas, the view's size) per scene unit. */
   scale() {
     return this.vz * this.herdrZoom();
+  }
+  /**
+   * What goes into a path, per scene unit. Herdr zooms every pixel length a mod writes, a
+   * path's points, stroke width and dashes included, exactly as it does a div's left, top and
+   * text size. So a path takes the canvas zoom only: with Herdr's zoom in it too, shapes
+   * were drawn zoom times larger than the text on them, and the text drifted off its shape
+   * further from the origin.
+   */
+  drawScale() {
+    return this.vz;
   }
   toScene(local) {
     const s = this.scale();
@@ -5429,7 +5439,7 @@ var Excalidraw = class extends View {
   }
   /** Rebuilds the static layers from every element not drawn live. */
   rebuild(cx) {
-    const scale = this.scale();
+    const scale = this.drawScale();
     const els = this.elements().filter((e4) => !this.active.has(e4.id));
     this.layers = buildLayers(els, this.map(), scale, this.shapeOptions());
     this.builtVz = this.vz;
@@ -5456,7 +5466,7 @@ var Excalidraw = class extends View {
   }
   /** Elements being drawn or dragged, the selection outline, the marquee. */
   renderLive() {
-    const s = this.scale();
+    const s = this.drawScale();
     const map = this.map();
     const els = [...this.active].map((id) => map.get(id)).filter(Boolean);
     const draw = buildLayers(els, map, s, this.shapeOptions()).flatMap((l) => l.draw);

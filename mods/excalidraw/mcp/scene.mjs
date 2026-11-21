@@ -1,3 +1,5 @@
+import { lineWidth } from "./metrics.mjs";
+
 const SHAPES = new Set(["rectangle", "ellipse", "diamond"]);
 const GAP = 6;
 const FONT = 20;
@@ -11,7 +13,7 @@ export function blankDocument() {
 
 export function textSize(text, fontSize = FONT) {
   const lines = String(text).split("\n");
-  return { width: Math.ceil(Math.max(...lines.map((l) => l.length), 1) * fontSize * 0.6), height: Math.ceil(lines.length * fontSize * 1.25) };
+  return { width: Math.ceil(Math.max(...lines.map((l) => lineWidth(l, fontSize)), 1)), height: Math.ceil(lines.length * fontSize * 1.25) };
 }
 
 function base(type, o, id) {
