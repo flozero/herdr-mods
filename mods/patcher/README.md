@@ -22,8 +22,8 @@ It runs at every start only in the `my-main` layout: a mod runs only where a lay
 it, and `my-main` is the only layout with the patcher's hidden block (Herdr rewrites `main`
 at every start, so it can't be added there). In any other layout, nothing is applied at start
 and the patched copies aren't shown. `cmd-alt-p` (`ctrl-alt-p` on Linux, or
-`herdr-app do mod.open --name patcher`) applies them again from any layout and shows each
-patch and copy.
+`herdr-app do mod.open --name patcher`) applies them again from any layout, shows each
+patch and copy, and switches to the `my-main` layout once they all applied.
 
 All copies change together or not at all. When a patch fails, the last working copies stay,
 `~/.config/herdr-app/patcher.error` says which patch and why, and an error toast opens the

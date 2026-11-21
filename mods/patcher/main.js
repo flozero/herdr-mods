@@ -154,6 +154,8 @@ export default class Patcher extends View {
             action: { name: "mod.open", args: { name: "patcher" } },
           });
         else if (!this.failed.length && !this.overlay) applied(copies);
+        // Opened by the person (cmd-alt-p, ctrl-alt-p): they want the patched layout, so switch to it.
+        else if (!this.failed.length && shared("layout") !== LAYOUT) run("layout.switch", { name: LAYOUT });
       } catch (error) {
         this.error = String(error);
         if (!this.overlay) notify({ title: "Patcher failed", body: this.error, level: "error" });
