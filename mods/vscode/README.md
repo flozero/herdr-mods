@@ -2,7 +2,7 @@
 
 `./install-vscode.sh` installs `vscode` and `vscode-open` (the launcher).
 
-> **Needs the Herdr fork with the webview: [flozero/herdr-app](https://github.com/flozero/herdr-app), branch `webview`.** Herdr's UI kit has no webview yet, so the mod fails to load on a stock Herdr.
+> **Needs the Herdr fork with the webview: [flozero/herdr-app](https://github.com/flozero/herdr-app), branch `florentg/webview`.** Herdr's UI kit has no webview yet, so the mod fails to load on a stock Herdr.
 
 ## What it does
 
@@ -26,6 +26,7 @@ From `keys/vscode.json` and `keys/vscode.linux.json`. While the web view has the
 
 | Key | Default | |
 | --- | --- | --- |
+| `port` | `8765` | the port code-server listens on (change it when something else uses 8765) |
 | `agent` | `["claude"]` | the agent the review starts when none works in the repository; the review is its last argument |
 | `installRecommended` | `false` | also install the extensions a repository recommends in `.vscode/extensions.json` |
 | `python` | none (the example: `${workspaceFolder}/venv/bin/python`) | the Python interpreter |
@@ -35,11 +36,11 @@ From `keys/vscode.json` and `keys/vscode.linux.json`. While the web view has the
 ## Requirements
 
 - The Herdr fork above.
-- macOS on Apple silicon (the code-server build it downloads is `macos-arm64`).
+- macOS, or Linux on X11 (`x86_64` or `arm64`): the mod downloads the code-server build for the machine (`macos-arm64`, `macos-amd64`, `linux-amd64` or `linux-arm64`). On Linux the web view is a WebKitGTK child of Herdr's X11 window, so start Herdr without `WAYLAND_DISPLAY` to run it on XWayland (`env -u WAYLAND_DISPLAY herdr-app`); on Wayland the pane stays empty. While the pointer is over the web view it has the keyboard, so Herdr's own shortcuts wait until the pointer leaves it. WebKitGTK 4.1 and GTK 3 must be installed (`webkit2gtk-4.1`, `gtk3` on Arch).
 - `curl`, `tar`, `zip`; `cargo`, optional, builds the Python environment tool for `ms-python.python`.
 
 ## Security
 
-- code-server listens on `127.0.0.1:8765` with `--auth none`: any program running as any user on this Mac can open it, and with it a shell as you. It reuses whatever already answers on that port.
+- code-server listens on `127.0.0.1:8765` (the `port` config) with `--auth none`: any program running as any user on this machine can open it, and with it a shell as you. It reuses whatever already answers on that port.
 - code-server `4.145.2` is downloaded over https from its GitHub release into `~/.cache/herdr-vscode`, to a temporary folder first; its checksum isn't checked.
 - Workspace trust is off, so a repository's tasks and settings apply as soon as it opens. The extension's `herdrReview.agent` and `herdrReview.base` are application settings: a repository's `.vscode/settings.json` can't change them. A repository's recommended extensions are installed only with `installRecommended`.

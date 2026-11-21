@@ -2,7 +2,7 @@ import { View, div, webview } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile } from "herdr";
 
-const PORT = 8765;
+const DEFAULT_PORT = 8765;
 const VERSION = "4.145.2";
 const DIR = () => `${home()}/.cache/herdr-vscode`;
 const SETTINGS = {
@@ -49,12 +49,19 @@ const SETTINGS = {
 };
 const START = `
 dir="$1"; port="$2"; version="$3"
-bin="$dir/code-server-$version-macos-arm64/bin/code-server"
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) platform=macos-arm64 ;;
+  Darwin-x86_64) platform=macos-amd64 ;;
+  Linux-x86_64) platform=linux-amd64 ;;
+  Linux-aarch64 | Linux-arm64) platform=linux-arm64 ;;
+  *) echo "code-server has no build for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+bin="$dir/code-server-$version-$platform/bin/code-server"
 curl -fsS -o /dev/null "http://127.0.0.1:$port/healthz" 2>/dev/null && exit 0
 if [ ! -x "$bin" ]; then
   tmp=$(mktemp -d "$dir/download.XXXXXX") || exit 1
-  curl -fsSL --proto =https --proto-redir =https -o "$tmp/code-server.tar.gz" "https://github.com/coder/code-server/releases/download/v$version/code-server-$version-macos-arm64.tar.gz" &&
-    tar xzf "$tmp/code-server.tar.gz" -C "$tmp" && mv "$tmp/code-server-$version-macos-arm64" "$dir/"
+  curl -fsSL --proto =https --proto-redir =https -o "$tmp/code-server.tar.gz" "https://github.com/coder/code-server/releases/download/v$version/code-server-$version-$platform.tar.gz" &&
+    tar xzf "$tmp/code-server.tar.gz" -C "$tmp" && mv "$tmp/code-server-$version-$platform" "$dir/"
   ok=$?
   rm -rf "$tmp"
   [ "$ok" -eq 0 ] || exit 1
@@ -68,7 +75,14 @@ curl -fsS -o /dev/null --retry 60 --retry-connrefused --retry-delay 1 "http://12
 const SYNC = `
 dir="$1"; version="$2"; review="$3"
 shift 3
-bin="$dir/code-server-$version-macos-arm64/bin/code-server"
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) platform=macos-arm64 ;;
+  Darwin-x86_64) platform=macos-amd64 ;;
+  Linux-x86_64) platform=linux-amd64 ;;
+  Linux-aarch64 | Linux-arm64) platform=linux-arm64 ;;
+  *) echo "code-server has no build for $(uname -s) $(uname -m)" >&2; exit 1 ;;
+esac
+bin="$dir/code-server-$version-$platform/bin/code-server"
 reviewed=$(sed -n 's/.*"version": "\\(.*\\)".*/\\1/p' "$review/package.json" | head -1)
 wanted=$(printf '%s\\n' "$version" "review@$reviewed" "$@" | tr A-Z a-z)
 [ "$wanted" = "$(cat "$dir/synced" 2>/dev/null)" ] && exit 0
@@ -138,6 +152,8 @@ export default class VsCode extends View {
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR()]);
       await writeSettings();
+      const wanted = (await readJson(`${appHome()}/mods/vscode/config.json`))?.port;
+      const PORT = Number.isInteger(wanted) && wanted > 0 && wanted < 65536 ? wanted : DEFAULT_PORT;
       const started = await exec("sh", ["-c", START, "sh", DIR(), String(PORT), VERSION], { timeout: 300000 }).catch((e) => ({ code: 1, stderr: String(e) }));
       if (started.code === 0) this.url = `http://127.0.0.1:${PORT}/?folder=${encodeURIComponent(this.folder)}`;
       else this.error = started.stderr.trim() || "VS Code did not start";
