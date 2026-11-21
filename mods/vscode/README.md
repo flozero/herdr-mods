@@ -36,7 +36,7 @@ From `keys/vscode.json` and `keys/vscode.linux.json`. While the web view has the
 ## Requirements
 
 - The Herdr fork above.
-- macOS, or Linux on X11 (`x86_64` or `arm64`): the mod downloads the code-server build for the machine (`macos-arm64`, `macos-amd64`, `linux-amd64` or `linux-arm64`). On Linux the web view is a WebKitGTK child of Herdr's X11 window, so start Herdr without `WAYLAND_DISPLAY` to run it on XWayland (`env -u WAYLAND_DISPLAY herdr-app`); on Wayland the pane stays empty. While the pointer is over the web view it has the keyboard, so Herdr's own shortcuts wait until the pointer leaves it. WebKitGTK 4.1 and GTK 3 must be installed (`webkit2gtk-4.1`, `gtk3` on Arch).
+- macOS, or Linux on X11 (`x86_64` or `arm64`): the mod downloads the code-server build for the machine (`macos-arm64`, `macos-amd64`, `linux-amd64` or `linux-arm64`). On Linux the web view is a WebKitGTK child of Herdr's X11 window, so start Herdr with `HERDR_APP_X11=1` to run its window on XWayland (`HERDR_APP_X11=1 herdr-app`; the fork keeps `WAYLAND_DISPLAY` for the terminals); on Wayland the pane stays empty. While the pointer is over the web view it has the keyboard, so Herdr's own shortcuts wait until the pointer leaves it. WebKitGTK 4.1 and GTK 3 must be installed (`webkit2gtk-4.1`, `gtk3` on Arch).
 - `curl`, `tar`, `zip`; `cargo`, optional, builds the Python environment tool for `ms-python.python`.
 
 ## Security
