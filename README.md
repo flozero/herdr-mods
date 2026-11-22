@@ -36,6 +36,7 @@ Each group installs alone (`./install-<group>.sh`) and has its README: what it d
 - [sentry](mods/sentry/README.md): Sentry issues through Sentry's MCP. `cmd-s` / `cmd-shift-s` (Linux `ctrl-shift-s` / `ctrl-alt-s`).
 - [http](mods/http/README.md): an HTTP client. `cmd-shift-h` (Linux `ctrl-alt-h`).
 - [excalidraw](mods/excalidraw/README.md): an Excalidraw canvas an agent can draw on. `cmd-shift-e` (Linux `ctrl-alt-e`).
-- [vscode](mods/vscode/README.md): VS Code in a pane, needs the Herdr fork with the webview. `cmd-e` (Linux `ctrl-shift-e`).
+- [code](mods/code/README.md): Herdr's own editor with language servers, the branch's changes and review comments for the agent, needs the Herdr fork with the editor language-server API. `cmd-e` (Linux `ctrl-shift-e`).
+- [vscode](mods/vscode/README.md): VS Code in a pane, needs the Herdr fork with the webview. `cmd-alt-e` (Linux `ctrl-alt-shift-e`).
 
 The agent is Claude by default; `agent` and `agentName` in a mod's `config.json` (in `settings.json` `worktrees` for the worktree mods) pick another.
