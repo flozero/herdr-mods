@@ -3,6 +3,10 @@ import { lineWidth } from "./metrics.mjs";
 const SHAPES = new Set(["rectangle", "ellipse", "diamond"]);
 const GAP = 6;
 const FONT = 20;
+const CHAR = 0.62;
+const PAD = 5;
+const LABEL_CHARS = { rectangle: 24, ellipse: 18, diamond: 14 };
+const WORD_MAX = 40;
 
 const rint = () => Math.floor(Math.random() * 2 ** 31);
 const rid = () => Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
@@ -14,6 +18,48 @@ export function blankDocument() {
 export function textSize(text, fontSize = FONT) {
   const lines = String(text).split("\n");
   return { width: Math.ceil(Math.max(...lines.map((l) => lineWidth(l, fontSize)), 1)), height: Math.ceil(lines.length * fontSize * 1.25) };
+}
+
+export function wrap(text, maxChars) {
+  const limit = Math.max(1, Math.floor(maxChars));
+  return String(text).split("\n").flatMap((line) => {
+    const out = [];
+    let cur = "";
+    for (const word of line.split(/\s+/).filter(Boolean)) {
+      for (let w = word; w;) {
+        if (!cur && w.length > limit) { out.push(w.slice(0, limit)); w = w.slice(limit); continue; }
+        const next = cur ? `${cur} ${w}` : w;
+        if (next.length <= limit) { cur = next; w = ""; } else { out.push(cur); cur = ""; }
+      }
+    }
+    out.push(cur);
+    return out;
+  }).join("\n");
+}
+
+const innerScale = (type) => (type === "ellipse" ? Math.SQRT1_2 : type === "diamond" ? 0.5 : 1);
+
+const innerOf = (shape) => {
+  const k = innerScale(shape.type);
+  return { width: Math.max(1, shape.width * k - PAD * 2), height: Math.max(1, shape.height * k - PAD * 2) };
+};
+
+const outerFor = (type, size) => {
+  const k = innerScale(type);
+  return { width: Math.ceil((size.width + PAD * 2) / k), height: Math.ceil((size.height + PAD * 2) / k) };
+};
+
+function fitLabel(shape, label) {
+  const source = label.originalText ?? label.text;
+  const word = Math.min(WORD_MAX, Math.max(1, ...String(source).split(/\s+/).map((w) => w.length)));
+  const wordWidth = outerFor(shape.type, { width: Math.ceil(word * label.fontSize * CHAR), height: 0 }).width;
+  if (shape.width < wordWidth) shape.width = wordWidth;
+  const charsFit = innerOf(shape).width / (label.fontSize * CHAR);
+  label.text = wrap(label.originalText ?? label.text, charsFit);
+  Object.assign(label, textSize(label.text, label.fontSize));
+  const need = outerFor(shape.type, label);
+  if (shape.height < need.height) shape.height = need.height;
+  if (shape.width < need.width) shape.width = need.width;
 }
 
 function base(type, o, id) {
@@ -80,11 +126,13 @@ export function draw(elements, shapes) {
     const id = fresh(s.id);
     if (s.type === "text") { add(textElement(s.text ?? "", s, id)); created.push(id); continue; }
     if (!SHAPES.has(s.type)) throw new Error(`unknown shape type: ${s.type}`);
-    const label = s.text ? textSize(s.text, s.fontSize ?? FONT) : { width: 0, height: 0 };
-    const shape = base(s.type, { ...s, width: s.width ?? Math.max(160, label.width + 40), height: s.height ?? Math.max(80, label.height + 30) }, id);
+    const label = s.text ? outerFor(s.type, textSize(wrap(s.text, LABEL_CHARS[s.type]), s.fontSize ?? FONT)) : { width: 0, height: 0 };
+    const shape = base(s.type, { ...s, width: s.width ?? Math.max(160, label.width + 30), height: s.height ?? Math.max(80, label.height + 20) }, id);
     add(shape);
     if (s.text) {
       const t = textElement(s.text, s, fresh(), shape);
+      fitLabel(shape, t);
+      Object.assign(t, { x: shape.x + shape.width / 2 - t.width / 2, y: shape.y + shape.height / 2 - t.height / 2 });
       shape.boundElements.push({ type: "text", id: t.id });
       add(t);
     }
@@ -133,6 +181,7 @@ export function update(elements, id, patch) {
     Object.assign(label, { text: String(patch.text), originalText: String(patch.text), ...textSize(patch.text, label.fontSize) });
     bump(label);
   }
+  if (label && label !== e && SHAPES.has(e.type)) fitLabel(e, label);
   if (label && label !== e) {
     const c = centerOf(e);
     label.x = c.x - label.width / 2;
@@ -166,7 +215,8 @@ export function clear(elements) {
 export function summarize(elements) {
   const all = live(elements);
   return all.filter((e) => !(e.type === "text" && e.containerId)).map((e) => {
-    const label = e.type === "text" ? e.text : labelOf(all, e)?.text;
+    const bound = labelOf(all, e);
+    const label = e.type === "text" ? e.text : bound?.originalText ?? bound?.text;
     return {
       id: e.id, type: e.type, x: Math.round(e.x), y: Math.round(e.y), width: Math.round(e.width), height: Math.round(e.height),
       ...(label ? { text: label } : {}),
