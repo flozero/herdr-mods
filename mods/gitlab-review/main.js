@@ -18,6 +18,7 @@ const FILES_W = 280;
 const SIDEBAR_W = 270;
 const STACK_DEPTH = 20;
 const STACK_EVERY = 60000;
+const DRAFT_PREFIX = /^\s*(\[draft\]|\(draft\)|draft:|draft\s-\s|draft\s)\s*/i;
 let ROW_SEQ = 0;
 const rowId = (row) => { if (row.id === undefined) row.id = ++ROW_SEQ; return row.id; };
 const MR_STATE = { opened: ["Open", "#108548"], draft: ["Draft", "#737278"], merged: ["Merged", "#1f75cb"], closed: ["Closed", "#dd2b0e"], locked: ["Locked", "#737278"] };
@@ -1141,24 +1142,26 @@ export default class GitlabReview extends View {
     if (!d || this.sending) return;
     if (!note) { this.say("The comment is empty", cx); return; }
     if (this.local) { this.addLocalNote(note, cx); return; }
-    this.sending = true;
-    cx.notify();
     const payload = this.draftPayload(note);
-    cx.spawn(async (cx) => this.sendDraft(cx, iid, d, payload));
+    const target = this.target;
+    const temp = { id: `pending-${Date.now()}`, note: payload.note, position: payload.position ?? null, discussion_id: payload.in_reply_to_discussion_id ?? null };
+    d.drafts = [...d.drafts, temp];
+    this.draft.set_value("");
+    this.target = GENERAL;
+    this.say(`Added to your review: ${d.drafts.length} pending, nobody sees them until you submit`, cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => this.sendDraft(cx, iid, d, payload, temp, target));
   }
 
-  async sendDraft(cx, iid, d, payload) {
+  async sendDraft(cx, iid, d, payload, temp, target) {
     try {
-      await gl.addDraft(this.top, iid, payload);
-      this.draft.set_value("");
-      this.target = GENERAL;
-      const drafts = await this.call(cx, `drafts:${iid}`, () => gl.drafts(this.top, iid));
-      if (drafts) d.drafts = drafts;
-      this.say(`Added to your review: ${d.drafts.length} pending, nobody sees them until you submit`, cx, "success");
+      const made = await gl.addDraft(this.top, iid, payload);
+      d.drafts = d.drafts.map((x) => (x === temp && made?.id ? made : x));
     } catch (e) {
-      this.say(`Couldn't add it: ${e?.message ?? e}`, cx, "error");
+      d.drafts = d.drafts.filter((x) => x !== temp);
+      if (!this.draft.value().trim()) { this.draft.set_value(payload.note); this.target = target; }
+      this.say(`Couldn't add it, the comment is back in the box: ${e?.message ?? e}`, cx, "error");
     } finally {
-      this.sending = false;
       cx.notify();
     }
   }
@@ -1166,12 +1169,16 @@ export default class GitlabReview extends View {
   async removeDraft(id, cx) {
     const iid = this.iid, d = this.details[iid];
     if (!d) return;
+    if (String(id).startsWith("pending-")) { this.say("Still saving that comment, try again in a second", cx); return; }
+    const before = d.drafts;
+    d.drafts = d.drafts.filter((x) => x.id !== id);
+    this.say("Pending comment deleted", cx);
+    cx.notify();
     try {
       await gl.deleteDraft(this.top, iid, id);
-      d.drafts = d.drafts.filter((x) => x.id !== id);
-      this.say("Pending comment deleted", cx);
     } catch (e) {
-      this.say(`Couldn't delete it: ${e?.message ?? e}`, cx, "error");
+      d.drafts = before;
+      this.say(`Couldn't delete it, it's back: ${e?.message ?? e}`, cx, "error");
     }
     cx.notify();
   }
@@ -1326,17 +1333,23 @@ export default class GitlabReview extends View {
     if (!e || this.savingDesc) return;
     const text = this.descDraft.value();
     if (text === e.original) { this.cancelDescription(cx); return; }
+    const d = this.details[e.iid];
     this.savingDesc = true;
-    this.say(`Saving the description of !${e.iid}…`, cx);
+    if (d) d.mr = { ...d.mr, description: text };
+    this.descEdit = null;
+    this.handle.focus();
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
         await gl.setDescription(this.top, e.iid, text);
-        this.descEdit = null;
         this.say(`Description of !${e.iid} saved`, cx, "success");
-        await this.loadMr(cx, e.iid);
-        this.handle.focus();
       } catch (err) {
-        this.say(`Couldn't save the description: ${err?.message ?? err}`, cx, "error");
+        if (d && d.mr.description === text) d.mr = { ...d.mr, description: e.original };
+        this.descEdit = e;
+        this.descText = text;
+        this.descDraft.set_value(text);
+        this.tab = "description";
+        this.say(`Couldn't save the description, it's back in the editor: ${err?.message ?? err}`, cx, "error");
       } finally {
         this.savingDesc = false;
         cx.notify();
@@ -1483,9 +1496,16 @@ export default class GitlabReview extends View {
           this.target = GENERAL;
           this.noteMine(iid, { commented: true });
         }
-        await gl.setState(this.top, iid, event);
+        const was = this.details[iid]?.mr?.state;
+        this.patchMr(iid, (m) => (m && m.iid === iid ? { ...m, state: event === "reopen" ? "opened" : "closed" } : m));
         this.say(event === "reopen" ? `Reopened !${iid}` : comment ? `Commented and closed !${iid}` : `Closed !${iid}`, cx, "success");
-        await this.loadMr(cx, iid);
+        cx.notify();
+        try {
+          await gl.setState(this.top, iid, event);
+        } catch (e) {
+          this.patchMr(iid, (m) => (m && m.iid === iid ? { ...m, state: was ?? m.state } : m));
+          throw e;
+        }
         this.refresh(cx);
       } catch (e) {
         this.say(`Couldn't ${event} !${iid}: ${e?.message ?? e}`, cx, "error");
@@ -1505,19 +1525,28 @@ export default class GitlabReview extends View {
     return mr?.iid && mr.state === "opened" ? mr : null;
   }
 
+  patchMr(iid, change) {
+    for (const d of Object.values(this.details)) if (d?.mr?.iid === iid) d.mr = change(d.mr);
+    if (this.remote?.iid === iid) this.remote = change(this.remote);
+    this.mrs = this.mrs.map(change);
+    this.authored = this.authored.map(change);
+  }
+
   toggleDraft(cx) {
     const mr = this.draftable();
     if (!mr || this.drafting || !this.project) return;
     const draft = !this.isDraft(mr), iid = mr.iid;
     this.drafting = true;
-    this.say(draft ? `Marking !${iid} as draft…` : `Marking !${iid} as ready…`, cx);
+    const flip = (on) => (m) => (m && m.iid === iid ? { ...m, draft: on, work_in_progress: on, title: on ? `Draft: ${m.title.replace(DRAFT_PREFIX, "")}` : m.title.replace(DRAFT_PREFIX, "") } : m);
+    this.patchMr(iid, flip(draft));
+    this.say(draft ? `!${iid} is a draft now` : `!${iid} is ready`, cx, "success");
+    cx.notify();
     cx.spawn(async (cx) => {
       try {
         await gl.setDraft(this.top, this.project.path_with_namespace, iid, draft);
-        this.say(draft ? `!${iid} is a draft now` : `!${iid} is ready`, cx, "success");
-        await this.loadMr(cx, iid);
         this.refresh(cx);
       } catch (e) {
+        this.patchMr(iid, flip(!draft));
         this.say(`Couldn't change the draft status of !${iid}: ${e?.message ?? e}`, cx, "error");
       } finally {
         this.drafting = false;
@@ -1578,15 +1607,21 @@ export default class GitlabReview extends View {
     if (!u || this.peopleBusy || !mr || !this.project) return;
     this.peopleBusy = u.username;
     const what = kind === "reviewers" ? "reviewer" : "assignee";
+    const d = this.details[this.iid];
+    const before = d?.side;
+    if (d?.side) {
+      const list = d.side[kind] ?? [];
+      d.side = { ...d.side, [kind]: u.on ? list.filter((x) => x.username !== u.username) : [...list, { username: u.username, name: u.name, state: null, approved: false }] };
+    }
+    this.say(u.on ? `${u.name} is no longer ${what} of !${mr.iid}` : `${u.name} is ${what} of !${mr.iid}`, cx, "success");
     cx.notify();
     cx.spawn(async (cx) => {
       try {
         await gl.setPeople(this.top, this.project.path_with_namespace, mr.iid, kind, [u.username], u.on ? "REMOVE" : "APPEND");
-        const side = await gl.sidebar(this.top, this.project.path_with_namespace, mr.iid);
-        const d = this.details[this.iid];
+        const side = await gl.sidebar(this.top, this.project.path_with_namespace, mr.iid).catch(() => null);
         if (d && side) { d.side = side; d.state = mySide(side, this.user?.username); }
-        this.say(u.on ? `${u.name} is no longer ${what} of !${mr.iid}` : `${u.name} is ${what} of !${mr.iid}`, cx, "success");
       } catch (e) {
+        if (d) d.side = before;
         this.say(`Couldn't change the ${what}s of !${mr.iid}: ${e?.message ?? e}`, cx, "error");
       } finally {
         this.peopleBusy = null;
