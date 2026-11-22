@@ -96,6 +96,13 @@ function repliesTo(threads, me, since) {
 }
 const has = (text, q) => String(text ?? "").toLowerCase().includes(q);
 
+const herdrEditorMod = async () => {
+  for (const mod of ["code", "vscode"]) {
+    if ((await exec("test", ["-f", `${appHome()}/mods/${mod}/main.js`]).catch(() => ({ code: 1 }))).code === 0) return mod;
+  }
+  return null;
+};
+
 export default class GitlabReview extends View {
   init(_props, cx) {
     this.focusUntil = Date.now() + 2000;
@@ -264,7 +271,8 @@ export default class GitlabReview extends View {
 
   async loadEditors(cx) {
     const [found, saved, prefs, herdrEditor] = await Promise.all([installedEditors(exec).catch(() => []), this.readStore(editorFile()), this.readStore(prefsFile()),
-      exec("test", ["-f", `${appHome()}/mods/vscode/main.js`]).then((r) => r.code === 0, () => false)]);
+      herdrEditorMod()]);
+    this.herdrEditor = herdrEditor;
     const editors = herdrEditor ? [HERDR_EDITOR, ...found] : found;
     this.editors = editors;
     this.editor = saved.app ?? null;
@@ -325,9 +333,10 @@ export default class GitlabReview extends View {
 
   async openPath(app, path) {
     if (app !== HERDR_EDITOR) return openIn(exec, app, path);
-    const name = `VS Code · ${path.split("/").pop()}`;
+    const mod = this.herdrEditor ?? "vscode";
+    const name = `${mod === "code" ? "Code" : "VS Code"} · ${path.split("/").pop()}`;
     for (const space of spaces()) {
-      const tab = space.tabs.find((candidate) => candidate.name === name && panes().some((pane) => pane.tab === candidate.id && pane.mod === "vscode"));
+      const tab = space.tabs.find((candidate) => candidate.name === name && panes().some((pane) => pane.tab === candidate.id && pane.mod === mod));
       if (tab) {
         run("space.select", { id: space.id });
         run("tab.select", { id: tab.id });
@@ -336,7 +345,8 @@ export default class GitlabReview extends View {
     }
     const home = spaces().find((space) => space.folder === path);
     if (!home) run("space.new", { folder: path, name: path.split("/").pop() });
-    run("tab.new", { name, mod: "vscode", props: { folder: path }, ...(home ? { space: home.id } : {}) });
+    const editorProps = mod === "code" ? { root: path, mode: "changes" } : { folder: path };
+    run("tab.new", { name, mod, props: editorProps, ...(home ? { space: home.id } : {}) });
     return { code: 0 };
   }
 

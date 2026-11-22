@@ -1,0 +1,6 @@
+{
+  "agent": ["claude"],
+  "agentName": "Claude",
+  "keys": {},
+  "servers": {}
+}
