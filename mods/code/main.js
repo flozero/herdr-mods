@@ -690,9 +690,14 @@ export default class Code extends View {
     this.changesLoading = true;
     this.redraw();
     try {
-      this.changes = await branchDiff(exec, this.root);
+      let changes = await branchDiff(exec, this.root, { base: this.review?.target ?? null });
+      this.review = await findReview(this.root, changes.branch).catch(() => null);
+      if (this.review?.target && changes.base !== `origin/${this.review.target}`) {
+        const stacked = await branchDiff(exec, this.root, { base: this.review.target });
+        if (stacked.base === `origin/${this.review.target}`) changes = stacked;
+      }
+      this.changes = changes;
       this.changedPaths = new Map(this.changes.files.map((file) => [file.new_path, file.new_file ? "added" : "modified"]));
-      this.review = await findReview(this.root, this.changes.branch).catch(() => null);
       for (const document of this.documents.values()) this.paintChanges(document);
     } catch (error) {
       this.message = `Changes: ${error?.message ?? error}`;

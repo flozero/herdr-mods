@@ -671,7 +671,7 @@ export default class GitlabReview extends View {
   }
 
   localDiff() {
-    return branchDiff(exec, this.top, { untracked: LOCAL_UNTRACKED, max: LOCAL_MAX });
+    return branchDiff(exec, this.top, { untracked: LOCAL_UNTRACKED, max: LOCAL_MAX, base: this.remote?.target_branch ?? null });
   }
 
   shownHere() {

@@ -36,14 +36,14 @@ export async function findReview(root, branch) {
   if (!forge) return null;
   if (forge.kind === "github") {
     if ((await exec("gh", ["auth", "status", "--hostname", forge.host])).code !== 0) return null;
-    const [pr] = JSON.parse(await run("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid,url", "--repo", `${forge.host}/${forge.path}`], root));
-    return pr ? { ...forge, label: "GitHub", number: pr.number, name: `#${pr.number}`, url: pr.url, head: pr.headRefOid } : null;
+    const [pr] = JSON.parse(await run("gh", ["pr", "list", "--head", branch, "--state", "open", "--json", "number,headRefOid,url,baseRefName", "--repo", `${forge.host}/${forge.path}`], root));
+    return pr ? { ...forge, label: "GitHub", number: pr.number, name: `#${pr.number}`, url: pr.url, head: pr.headRefOid, target: pr.baseRefName } : null;
   }
   if ((await exec("glab", ["auth", "status", "--hostname", forge.host])).code !== 0) return null;
   const [mr] = JSON.parse(await run("glab", ["api", `projects/:id/merge_requests?source_branch=${encodeURIComponent(branch)}&state=opened`], root));
   if (!mr) return null;
   const detail = JSON.parse(await run("glab", ["api", `projects/:id/merge_requests/${mr.iid}`], root));
-  return { ...forge, label: "GitLab", number: mr.iid, name: `!${mr.iid}`, url: mr.web_url, head: detail.diff_refs?.head_sha ?? mr.sha, refs: detail.diff_refs };
+  return { ...forge, label: "GitLab", number: mr.iid, name: `!${mr.iid}`, url: mr.web_url, head: detail.diff_refs?.head_sha ?? mr.sha, refs: detail.diff_refs, target: mr.target_branch };
 }
 
 function anchorOf(comment, files) {

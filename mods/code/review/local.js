@@ -71,12 +71,14 @@ export async function worktreeStamp(exec, top) {
   return (await exec("sh", ["-c", STAMP, "sh", top])).stdout;
 }
 
-export async function branchDiff(exec, top, { untracked: maxUntracked = 200, max = 400000 } = {}) {
+export async function branchDiff(exec, top, { untracked: maxUntracked = 200, max = 400000, base = null } = {}) {
   const git = (args) => exec("git", ["-C", top, ...args]);
   const names = async (args) => new Set((await git(["diff", "--name-only", "--no-ext-diff", "-M", ...args])).stdout.split("\n").filter(Boolean));
   const branch = (await git(["branch", "--show-current"])).stdout.trim() || "HEAD";
   const head = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-  const target = head.code === 0 ? head.stdout.trim() : "origin/main";
+  const stacked = base && `origin/${base}` !== head.stdout.trim() ? `origin/${base}` : null;
+  if (stacked) await git(["fetch", "--quiet", "origin", base]);
+  const target = stacked && (await git(["rev-parse", "--verify", "--quiet", stacked])).code === 0 ? stacked : head.code === 0 ? head.stdout.trim() : "origin/main";
   if (branch !== "HEAD") await git(["fetch", "--quiet", "origin", branch]);
   const stamp = await worktreeStamp(exec, top);
   const mb = await git(["merge-base", "HEAD", target]);
