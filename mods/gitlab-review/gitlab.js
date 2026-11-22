@@ -44,6 +44,8 @@ export const reviewing = (cwd, username) =>
 export const mergeRequest = (cwd, iid) => get(cwd, mrPath(iid));
 export const forBranch = (cwd, branch) =>
   get(cwd, `projects/:id/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}`);
+export const intoBranch = (cwd, branch) =>
+  get(cwd, `projects/:id/merge_requests?state=opened&target_branch=${encodeURIComponent(branch)}&per_page=100`);
 export const diffs = (cwd, iid) => all(cwd, `${mrPath(iid)}/diffs?per_page=100`);
 export const discussions = (cwd, iid) => all(cwd, `${mrPath(iid)}/discussions?per_page=100`);
 export const approvals = (cwd, iid) => get(cwd, `${mrPath(iid)}/approvals`);

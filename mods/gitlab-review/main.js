@@ -16,6 +16,8 @@ const MONO = "JetBrains Mono";
 const MAX_ROWS = 4000;
 const FILES_W = 280;
 const SIDEBAR_W = 270;
+const STACK_DEPTH = 20;
+const STACK_EVERY = 60000;
 let ROW_SEQ = 0;
 const rowId = (row) => { if (row.id === undefined) row.id = ++ROW_SEQ; return row.id; };
 const MR_STATE = { opened: ["Open", "#108548"], draft: ["Draft", "#737278"], merged: ["Merged", "#1f75cb"], closed: ["Closed", "#dd2b0e"], locked: ["Locked", "#737278"] };
@@ -131,6 +133,7 @@ export default class GitlabReview extends View {
     this.user = null;
     this.mrs = [];
     this.authored = [];
+    this.stackParents = {};
     this.health = {};
     this.sel = 0;
     this.details = {};
@@ -329,6 +332,40 @@ export default class GitlabReview extends View {
           .on_mouse_down("left", stop).on_click((_e, cx) => this.setListTab(tab, cx))
           .child(`${n + 1}  ${LIST_LABEL[tab]}`).child(div().text_size(10.5).text_color(t.dim).child(count));
       }));
+  }
+
+  openStackBranch(m, cx) {
+    if (!m.source_branch || this.openingStack) return;
+    this.openingStack = true;
+    this.say(`Opening the review of ${m.source_branch}…`, cx);
+    cx.spawn(async (cx) => {
+      try {
+        const { path, created, main } = await branchCheckout(exec, this.top, m.source_branch, home());
+        if (created && path !== main) {
+          this.say(`Setting up the worktree for ${m.source_branch}…`, cx);
+          const setup = await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: m.source_branch });
+          if (setup.code !== 0) this.say(`Worktree setup failed: ${(setup.stderr || setup.stdout || "").trim().split("\n").pop()}`, cx, "error");
+        }
+        const name = `Review · ${path.split("/").pop()}`;
+        for (const space of spaces()) {
+          const tab = space.tabs.find((x) => x.name === name && panes().some((pane) => pane.tab === x.id && pane.mod === "gitlab-review"));
+          if (tab) {
+            run("space.select", { id: space.id });
+            run("tab.select", { id: tab.id });
+            return;
+          }
+        }
+        const space = spaces().find((x) => x.folder === path);
+        if (!space) run("space.new", { folder: path, name: path.split("/").pop() });
+        run("tab.new", { name, mod: "gitlab-review", props: { cwd: path, local: true }, ...(space ? { space: space.id } : {}) });
+        this.say(`${created ? "Worktree created: " : ""}${m.source_branch} opened for review`, cx, "success");
+      } catch (e) {
+        this.say(`Couldn't open ${m.source_branch}: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        this.openingStack = false;
+        cx.notify();
+      }
+    });
   }
 
   async openPath(app, path) {
@@ -697,8 +734,15 @@ export default class GitlabReview extends View {
       approvals: approvals ?? prev?.approvals ?? null,
       side: remote ? side ?? prev?.side ?? null : null,
       since: null, newCommits: [], state: side && this.user ? mySide(side, this.user.username) : null,
+      stack: prev?.stack ?? null,
     };
     cx.notify();
+    const shown = mr ?? prev?.mr ?? pseudo;
+    if (shown.source_branch && Date.now() - (this.stackAt?.[shown.source_branch] ?? 0) > STACK_EVERY) {
+      this.stackAt = { ...this.stackAt, [shown.source_branch]: Date.now() };
+      const stack = await this.loadStack({ ...shown, target_branch: shown.target_branch?.replace(/^origin\//, "") });
+      if (this.details[iid]) { this.details[iid].stack = stack; cx.notify(); }
+    }
   }
 
   saveNotes(cx) {
@@ -908,6 +952,7 @@ export default class GitlabReview extends View {
       const seen = Object.fromEntries(Object.entries(this.seen).filter(([iid]) => open.has(iid)));
       if (Object.keys(seen).length !== Object.keys(this.seen).length) { this.seen = seen; this.persist(seenFile(), seen, cx); }
     }
+    await this.loadParents(cx, [...(mrs ?? []), ...this.authored]);
     if (mrs) {
       const mine = await this.call(cx, "summary", () => gl.reviewSummary(this.top, this.project.path_with_namespace, mrs.map((m) => m.iid), this.user.username));
       if (mine) this.mine = mine;
@@ -915,6 +960,48 @@ export default class GitlabReview extends View {
     }
     if (this.merged !== null) await this.loadMerged(cx);
     if (this.iid) await this.loadMr(cx, this.iid);
+  }
+
+  baseBranch() {
+    return this.project?.default_branch ?? "master";
+  }
+
+  stackedOn(m) {
+    return new Set([...this.mrs, ...this.authored].filter((x) => x.target_branch === m.source_branch && x.iid !== m.iid).map((x) => x.iid)).size;
+  }
+
+  async loadParents(cx, mrs) {
+    const branches = [...new Set(mrs.map((m) => m.target_branch))].filter((b) => b && b !== this.baseBranch() && !(b in this.stackParents));
+    if (!branches.length) return;
+    const found = await Promise.all(branches.map((b) => gl.forBranch(this.top, b).then((list) => list?.[0] ?? null).catch(() => null)));
+    branches.forEach((b, i) => { this.stackParents[b] = found[i] && { iid: found[i].iid, title: found[i].title }; });
+    cx.notify();
+  }
+
+  async loadStack(mr) {
+    const below = [];
+    const seen = new Set([mr.iid]);
+    for (let branch = mr.target_branch; branch && branch !== this.baseBranch() && below.length < STACK_DEPTH;) {
+      const parent = await gl.forBranch(this.top, branch).then((list) => list?.[0] ?? null).catch(() => null);
+      if (!parent || seen.has(parent.iid)) break;
+      seen.add(parent.iid);
+      below.unshift(parent);
+      branch = parent.target_branch;
+    }
+    const above = [];
+    const climb = async (branch, depth) => {
+      if (depth > STACK_DEPTH) return;
+      const children = await gl.intoBranch(this.top, branch).catch(() => []);
+      for (const child of children ?? []) {
+        if (seen.has(child.iid)) continue;
+        seen.add(child.iid);
+        above.push({ ...child, depth });
+        await climb(child.source_branch, depth + 1);
+      }
+    };
+    await climb(mr.source_branch, 1);
+    const base = below[0]?.target_branch ?? mr.target_branch;
+    return below.length || above.length || mr.target_branch !== this.baseBranch() ? { base, below, above } : null;
   }
 
   async loadRules(cx) {
@@ -986,7 +1073,10 @@ export default class GitlabReview extends View {
   async loadMr(cx, iid) {
     if (this.local) return this.loadBranch(cx);
     const [mr, files, threads, drafts, approvals, side] = await Promise.all([
-      this.call(cx, `mr:${iid}`, () => gl.mergeRequest(this.top, iid)),
+      this.call(cx, `mr:${iid}`, () => gl.mergeRequest(this.top, iid)).then((mr) => {
+        if (mr) this.loadStack(mr).then((stack) => { if (this.details[iid]) { this.details[iid].stack = stack; cx.notify(); } else this.pendingStack = { iid, stack }; });
+        return mr;
+      }),
       this.call(cx, `diffs:${iid}`, () => gl.diffs(this.top, iid)),
       this.call(cx, `threads:${iid}`, () => gl.discussions(this.top, iid)),
       this.call(cx, `drafts:${iid}`, () => gl.drafts(this.top, iid)),
@@ -1017,7 +1107,9 @@ export default class GitlabReview extends View {
       approvals: approvals ?? prev?.approvals ?? null,
       state: side ? mySide(side, this.user.username) : prev?.state ?? null,
       side: side ?? prev?.side ?? null,
+      stack: this.pendingStack?.iid === iid ? this.pendingStack.stack : prev?.stack ?? null,
     };
+    if (this.pendingStack?.iid === iid) this.pendingStack = null;
     cx.notify();
   }
 
@@ -2059,10 +2151,12 @@ export default class GitlabReview extends View {
   localHeader(t, d) {
     const busy = this.loading.size > 0;
     return h_flex().h(42).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
-      .child(div().text_size(14).font_semibold().child(this.remote ? `!${this.remote.iid}` : "Branch"))
-      .child(div().flex_1().min_w(0).truncate().child(d ? (this.remote ? d.mr.title : `${this.top.split("/").pop()} · ${d.mr.source_branch}`) : this.top ?? ""))
+      .child(this.remote
+        ? div().id("h-iid").text_size(14).font_semibold().cursor_pointer().hover((s) => s.text_color(t.accent))
+          .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(`!${this.remote.iid}`, cx)).child(`!${this.remote.iid}`)
+        : div().text_size(14).font_semibold().child("Branch"))
+      .child(div().flex_1().min_w(0).truncate().child(d ? (this.remote ? d.mr.title : this.top.split("/").pop()) : this.top ?? ""))
       .when(busy, (el) => el.child(div().text_size(11).text_color(t.dim).child("loading…")))
-      .when(Boolean(d?.base), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`against ${d.base}`)))
       .when(!d, (el) => el.child(this.button(t, "h-search", "Search  ⌘F", (cx) => this.openSearch(cx)))
         .child(this.button(t, "h-refresh", "↻  ⌘R", (cx) => this.reload(cx))));
   }
@@ -2261,6 +2355,8 @@ export default class GitlabReview extends View {
         .child(h_flex().w(64).flex_none().child(div().id(`mr-iid-${m.iid}`).text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.accent))
           .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.copy(`!${m.iid}`, cx); }).child(`!${m.iid}`)))
         .when(m.draft, (el) => el.child(this.chip(t, "draft")))
+        .when(!(m.target_branch && m.target_branch !== this.baseBranch()) && this.stackedOn(m) > 0, (el) => el.child(this.chip(t, `stack base · ${this.stackedOn(m)} on it`, t.accent)))
+        .when(Boolean(m.target_branch) && m.target_branch !== this.baseBranch(), (el) => el.child(this.chip(t, this.stackParents[m.target_branch] ? `stacked on !${this.stackParents[m.target_branch].iid}` : `stacked on ${m.target_branch}`, t.accent)))
         .when(ignored, (el) => el.child(this.chip(t, "ignored")))
         .when(Boolean(mineTag), (el) => el.child(this.chip(t, mineTag?.[0], mineTag?.[1])))
         .child(div().flex_1().min_w(0).truncate().when(unread, (el) => el.font_semibold())
@@ -2359,6 +2455,20 @@ export default class GitlabReview extends View {
       .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
   }
 
+  stackSection(t, d) {
+    const { base, below, above } = d.stack;
+    const row = (m, depth, current) => h_flex().id(`stk-${m.iid}`).w_full().gap(6).items_center().text_size(12).pl(depth * 10).py(2).rounded(5)
+      .when(current, (el) => el.bg(t.selected))
+      .when(!current, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => this.openStackBranch(m, cx)))
+      .when(m.iid !== "local", (el) => el.child(div().flex_none().text_color(t.dim).child(`!${m.iid}`)))
+      .child(div().flex_1().min_w(0).truncate().text_color(current ? t.foreground : t.accent).child(m.title))
+      .when(Boolean(m.draft), (el) => el.child(this.chip(t, "draft")));
+    const chain = [...below.map((m) => row(m, 0, false)), row(d.mr, 0, true), ...above.map((m) => row(m, Math.min(m.depth - 1, 4), false))];
+    return this.sideSection(t, "Stack", below.length + above.length + 1, v_flex().w_full().gap(1)
+      .child(div().text_size(11).text_color(t.dim).child(`on ${base}`))
+      .children(chain));
+  }
+
   sideRules(t, d) {
     const matches = this.rulesFor(d);
     const note = !this.rules ? (this.rulesError ? `Unavailable: ${this.rulesError}` : "Loading…") : matches.length ? null : "None applies to these files";
@@ -2376,6 +2486,9 @@ export default class GitlabReview extends View {
     const s = d.side, mr = d.mr, real = mr.state !== "local";
     const none = (text) => div().text_size(12).text_color(t.dim).child(text);
     const detail = (k, v) => h_flex().w_full().gap(8).text_size(12).child(div().w(64).flex_none().text_color(t.dim).child(k)).child(div().flex_1().min_w(0).truncate().child(v));
+    const copyDetail = (k, v) => h_flex().id(`sd-${k}`).w_full().gap(8).text_size(12).cursor_pointer().hover((s) => s.text_color(t.accent))
+      .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(v, cx))
+      .child(div().w(64).flex_none().text_color(t.dim).child(k)).child(div().flex_1().min_w(0).truncate().child(v)).child(div().flex_none().text_size(11).text_color(t.dim).child("⧉"));
     const status = real
       ? v_flex().w_full().gap(8)
         .child(h_flex().gap(6).items_center().flex_wrap().child(this.statePill(t, mr))
@@ -2399,14 +2512,15 @@ export default class GitlabReview extends View {
       .child(this.sideSection(t, "Actions", null, actions))
       .when(real, (el) => el.child(this.sideRules(t, d)));
     if (!real) {
-      return side.child(this.sideSection(t, "Details", null, v_flex().w_full().gap(4)
-        .child(detail("Branch", mr.source_branch ?? ""))
-        .child(detail("Into", d.base ?? mr.target_branch ?? ""))));
+      return side.when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)))
+        .child(this.sideSection(t, "Details", null, v_flex().w_full().gap(4)
+          .child(copyDetail("Branch", mr.source_branch ?? ""))
+          .child(copyDetail("Into", d.base ?? mr.target_branch ?? ""))));
     }
     const details = this.sideSection(t, "Details", null, v_flex().w_full().gap(4)
       .child(detail("Author", mr.author?.name ?? who(mr.author)))
-      .child(detail("Branch", mr.source_branch))
-      .child(detail("Into", mr.target_branch))
+      .child(copyDetail("Branch", mr.source_branch))
+      .child(copyDetail("Into", mr.target_branch))
       .child(detail("Opened", agoText(mr.created_at)))
       .child(detail("Updated", agoText(mr.updated_at))));
     if (!s) return side.child(none("Loading reviewers…")).child(details);
@@ -2432,6 +2546,7 @@ export default class GitlabReview extends View {
         editable ? this.sideLink(t, `sp-edit-${kind}`, open ? "Done" : "Edit", (cx) => this.openPeople(kind, cx), open) : null);
     };
     return side
+      .when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)))
       .child(peopleSection("assignees", "Assignees"))
       .child(peopleSection("reviewers", "Reviewers", reviewState))
       .child(this.sideSection(t, "Approvals", null, div().text_size(12).text_color(left === 0 && (required > 0 || approvedBy) ? t.done : t.muted).child(approvals)))
