@@ -8,7 +8,13 @@
 
 Herdr's own editor in a tab, on the focused pane's repository: a file tree (drag its edge to resize it), a file finder, language servers (completion, hover, go to definition, diagnostics), and the branch's changes against its base. A changed file opens as its diff: the whole file with its line numbers and its deleted lines (`−`, on red) between the others, added lines on green. Edit it as any file; deleted lines can't be edited. gitlab-review's Herdr editor (`e`) opens it on a merge request's worktree, in the changes view.
 
-**Search** finds text in the repository's files with `git grep`, so what `.gitignore` ignores is left out (untracked files are in). Replace the selected match (`Replace`, or `⏎` in the replace field), skip it (`Skip`), or replace them all (`Replace all`). A file that had no unsaved edits is saved after its replacement; one that had keeps them unsaved.
+In the changes, **Uncommitted** shows only what isn't committed yet (against `HEAD`), **All** the whole branch against its base.
+
+**Graph** shows the history (`git log --graph`, the branch and its base); click a commit to see its diff, click one of its files to open it, `Esc` goes back to the editor.
+
+**Search** finds text in the repository's files with `git grep`, so what `.gitignore` ignores is left out (untracked files are in). Replace the selected match (`Replace`, or `⏎` in the replace field), skip it (`Skip`), or replace them all (`Replace all`).
+
+Search has two tabs. **Text** is the search above. **Symbol** works through the language servers: it takes the symbol under the cursor (`At cursor` takes it again) and lists its real uses, not the same word in a string or another scope; `Rename` renames all of them. Type another name to find a symbol of the project, and click one to use it. A file that had no unsaved edits is saved after its replacement; one that had keeps them unsaved.
 
 Files changed on disk (by an agent, say) reload in the editor when they have no unsaved edits, and the changes refresh.
 
@@ -35,6 +41,8 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl--` | go back to the previous file or place |
 | `ctrl-=`, `ctrl-+` | go forward again |
 | `ctrl-alt-down`, `ctrl-alt-up` | next, previous change in the file |
+| `ctrl-alt-m` | show or hide the MR comments in the code (`ctrl-k` on one replies) |
+| `ctrl-alt-r`, `ctrl-alt-h` | resolve or reopen, hide or show the MR thread under the cursor (resolved ones start hidden) |
 | `ctrl-alt-right`, `ctrl-alt-left` | next, previous tab |
 | `ctrl-/` | show the shortcuts |
 

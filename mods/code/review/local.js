@@ -71,6 +71,54 @@ export async function worktreeStamp(exec, top) {
   return (await exec("sh", ["-c", STAMP, "sh", top])).stdout;
 }
 
+const withRows = (max) => (f) => ({ ...f, too_large: f.diff.length > max, rows: f.diff.length > max ? [] : parseDiff(f.diff) });
+
+async function diffFiles(git, against, { maxUntracked = 200, max = 400000 } = {}) {
+  const diff = await git(["diff", "--no-color", "--no-ext-diff", "-M", against]);
+  if (diff.code !== 0) throw new Error(diff.stderr.trim() || "git diff failed");
+  const untracked = (await git(["ls-files", "--others", "--exclude-standard"])).stdout.split("\n").filter(Boolean).slice(0, maxUntracked);
+  const extra = await Promise.all(untracked.map((path) => git(["diff", "--no-color", "--no-index", "--", "/dev/null", path])));
+  return { files: splitGitDiff([diff.stdout, ...extra.map((x) => x.stdout)].join("\n")).map(withRows(max)), untracked };
+}
+
+export async function workingDiff(exec, top, options = {}) {
+  const git = (args) => exec("git", ["-C", top, ...args]);
+  const head = await git(["rev-parse", "--verify", "--quiet", "HEAD"]);
+  if (head.code !== 0) return null;
+  const { files } = await diffFiles(git, "HEAD", options);
+  return { base: "HEAD", fork: head.stdout.trim(), files };
+}
+
+const FIELD = "\x1f";
+
+export function parseGraph(text) {
+  return String(text ?? "").split("\n").filter((line) => line.length).map((line) => {
+    const at = line.indexOf(FIELD);
+    if (at < 0) return { graph: line.trimEnd() };
+    const [sha, short, subject, refs, author, when] = line.slice(at + 1).split(FIELD);
+    const names = refs ? refs.split(", ") : [];
+    return { graph: line.slice(0, at).trimEnd(), sha, short, subject, author, when,
+      head: names.some((ref) => ref === "HEAD" || ref.startsWith("HEAD -> ")),
+      refs: names.map((ref) => ref.replace(/^HEAD -> /, "")).filter((ref) => ref !== "HEAD") };
+  });
+}
+
+export async function commitGraph(exec, top, { refs = [], limit = 300 } = {}) {
+  const format = ["", "%H", "%h", "%s", "%D", "%an", "%ar"].join(FIELD);
+  const log = await exec("git", ["-C", top, "log", "--graph", "--topo-order", "--no-color", `--format=${format}`, "-n", String(limit), "HEAD", ...refs, "--"]);
+  if (log.code !== 0) throw new Error(log.stderr.trim() || "git log failed");
+  return parseGraph(log.stdout);
+}
+
+export async function commitDiff(exec, top, sha, { max = 400000 } = {}) {
+  const shown = await exec("git", ["-C", top, "show", "--no-color", "--no-ext-diff", "-M", "--diff-merges=first-parent", "--format=%H%n%an%n%ar%n%B", sha]);
+  if (shown.code !== 0) throw new Error(shown.stderr.trim() || "git show failed");
+  const start = shown.stdout.search(/^diff --git /m);
+  const head = (start < 0 ? shown.stdout : shown.stdout.slice(0, start)).replace(/\s+$/, "").split("\n");
+  const [full, author, when, ...message] = head;
+  return { sha: full, author, when, message: message.join("\n").trim(), files: splitGitDiff(start < 0 ? "" : shown.stdout.slice(start)).map(withRows(max)) };
+}
+
 export async function branchDiff(exec, top, { untracked: maxUntracked = 200, max = 400000, base = null } = {}) {
   const git = (args) => exec("git", ["-C", top, ...args]);
   const names = async (args) => new Set((await git(["diff", "--name-only", "--no-ext-diff", "-M", ...args])).stdout.split("\n").filter(Boolean));
@@ -83,10 +131,7 @@ export async function branchDiff(exec, top, { untracked: maxUntracked = 200, max
   const stamp = await worktreeStamp(exec, top);
   const mb = await git(["merge-base", "HEAD", target]);
   const fork = mb.code === 0 ? mb.stdout.trim() : null;
-  const diff = await git(["diff", "--no-color", "--no-ext-diff", "-M", fork ?? "HEAD"]);
-  if (diff.code !== 0) throw new Error(diff.stderr.trim() || "git diff failed");
-  const untracked = (await git(["ls-files", "--others", "--exclude-standard"])).stdout.split("\n").filter(Boolean).slice(0, maxUntracked);
-  const extra = await Promise.all(untracked.map((path) => git(["diff", "--no-color", "--no-index", "--", "/dev/null", path])));
+  const { files: parsed, untracked } = await diffFiles(git, fork ?? "HEAD", { maxUntracked, max });
   const count = async (range) => Number((await git(["rev-list", "--count", range])).stdout.trim()) || 0;
   const upstream = `origin/${branch}`;
   const pushed = branch !== "HEAD" && (await git(["rev-parse", "--verify", "--quiet", upstream])).code === 0;
@@ -97,9 +142,7 @@ export async function branchDiff(exec, top, { untracked: maxUntracked = 200, max
     names(["HEAD"]),
   ]);
   for (const path of untracked) changed.add(path);
-  const files = splitGitDiff([diff.stdout, ...extra.map((x) => x.stdout)].join("\n"))
-    .map((f) => ({ ...f, too_large: f.diff.length > max, rows: f.diff.length > max ? [] : parseDiff(f.diff),
-      state: { uncommitted: changed.has(f.new_path), committed: committed.has(f.new_path), pushed: onRemote.has(f.new_path) } }));
+  const files = parsed.map((f) => ({ ...f, state: { uncommitted: changed.has(f.new_path), committed: committed.has(f.new_path), pushed: onRemote.has(f.new_path) } }));
   const status = {
     pushed,
     ahead: pushed ? await count(`${upstream}..HEAD`) : fork ? await count(`${fork}..HEAD`) : 0,
