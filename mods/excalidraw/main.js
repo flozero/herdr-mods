@@ -5521,7 +5521,10 @@ var Excalidraw = class extends View {
     const bg = toColor(this.doc.appState.viewBackgroundColor) ?? "#ffffff";
     const cursor = (el) => this.tool === "hand" || this.spaceDown ? el.cursor_grab() : this.tool === "text" ? el.cursor_text() : this.tool === "selection" ? el.cursor_default() : el.cursor_crosshair();
     const canvas = cursor(div2().id("canvas").absolute().top(0).left(0).size_full().bg(bg).overflow_hidden()).on_mouse_down("left", (e4, cx) => this.onDown(e4, cx)).on_mouse_down("middle", (e4, cx) => this.onPanStart(e4, cx)).on_mouse_move((e4, cx) => this.onMove(e4, cx)).on_mouse_up("left", (e4, cx) => this.onUp(cx)).on_mouse_up("middle", (e4, cx) => this.onUp(cx)).on_scroll_wheel((e4, cx) => this.onWheel(e4, cx)).child(div2().absolute().left(this.scrollX * this.vz).top(this.scrollY * this.vz).size_full().children([...this.visibleLayerViews(), this.liveView, ...this.textEditor()])).child(this.emptyHint());
-    return root.track_focus(this.focus).on_key_down((e4, cx) => this.onKey(e4, cx)).on_key_up((e4, cx) => {
+    return root.track_focus(this.focus).on_key_down((e4, cx) => this.onKey(e4, cx))
+      .on_action("terminal.copy", (_e, cx) => { if (!this.editing && !this.renaming) this.copySelection(cx, false); })
+      .on_action("terminal.paste", (_e, cx) => { if (!this.editing && !this.renaming) this.pasteClipboard(cx); })
+      .on_action("terminal.paste_image", (_e, cx) => { if (!this.editing && !this.renaming) this.pasteClipboard(cx); }).on_key_up((e4, cx) => {
       if (e4.key === "space") {
         this.spaceDown = false;
         cx.notify();
@@ -6249,8 +6252,8 @@ var Excalidraw = class extends View {
     const map = this.map();
     if (k2 === "cmd-z") return this.undo(cx);
     if (k2 === "cmd-shift-z" || k2 === "cmd-y") return this.redo(cx);
-    if (k2 === "cmd-c" || k2 === "cmd-x") return this.copySelection(cx, k2 === "cmd-x");
-    if (k2 === "cmd-v") return this.pasteClipboard(cx);
+    if (k2 === "cmd-c" || k2 === "cmd-x" || k2 === "ctrl-c" || k2 === "ctrl-x") return this.copySelection(cx, k2.endsWith("x"));
+    if (k2 === "cmd-v" || k2 === "ctrl-v") return this.pasteClipboard(cx);
     if (k2 === "ctrl-d") return this.duplicateSelection(cx);
     if (k2 === "cmd-a") {
       this.tool = "selection";
