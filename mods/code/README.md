@@ -34,6 +34,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `shift-f12`, `ctrl-click` or right click | show where it is used (click a line to go there, `Esc` closes) |
 | `ctrl--` | go back to the previous file or place |
 | `ctrl-=`, `ctrl-+` | go forward again |
+| `ctrl-alt-down`, `ctrl-alt-up` | next, previous change in the file |
 | `ctrl-alt-right`, `ctrl-alt-left` | next, previous tab |
 | `ctrl-/` | show the shortcuts |
 

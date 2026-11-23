@@ -33,6 +33,8 @@ const ACTIONS = [
   { id: "references", key: "shift-f12", label: "Show where it is used", run: (view) => view.findReferences() },
   { id: "back", key: "ctrl--", label: "Go back", run: (view) => view.goBack() },
   { id: "forward", key: "ctrl-=", aliases: ["ctrl-+", "ctrl-shift-="], label: "Go forward", run: (view) => view.goForward() },
+  { id: "nextChange", key: "ctrl-alt-down", label: "Next change", run: (view) => view.stepChange(1) },
+  { id: "previousChange", key: "ctrl-alt-up", label: "Previous change", run: (view) => view.stepChange(-1) },
   { id: "nextTab", key: "ctrl-alt-right", label: "Next tab", run: (view) => view.cycleTab(1) },
   { id: "previousTab", key: "ctrl-alt-left", label: "Previous tab", run: (view) => view.cycleTab(-1) },
   { id: "shortcuts", key: "ctrl-/", label: "Show the shortcuts", run: (view) => view.toggleShortcuts() },
@@ -829,12 +831,31 @@ export default class Code extends View {
       document.diff.syncing = false;
       this.selectReal(document, range);
     }
+    document.diff.kinds = kinds;
     this.labelDiff(document);
     document.diff.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" ? [] : [{
       range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
       color: kind === "del" ? DIFF_DELETED : DIFF_ADDED,
     }])));
     return document.diff;
+  }
+
+  stepChange(step) {
+    const diff = this.current?.diff;
+    const kinds = diff?.kinds ?? [];
+    const starts = kinds.flatMap((kind, i) => (kind !== "ctx" && (i === 0 || kinds[i - 1] === "ctx") ? [i] : []));
+    if (!starts.length) {
+      this.message = "No changes in this file";
+      return this.redraw();
+    }
+    const text = diff.state.value();
+    const line = positionOf(text, diff.state.selected_range().start).line;
+    const target = step > 0 ? starts.find((start) => start > line) ?? starts[0] : starts.findLast((start) => start < line) ?? starts.at(-1);
+    const offset = offsetOf(text, { line: target, character: 0 });
+    diff.state.set_selected_range({ start: offset, end: offset });
+    diff.state.focus();
+    this.message = `Change ${starts.indexOf(target) + 1}/${starts.length}`;
+    this.redraw();
   }
 
   syncFromDiff(document) {
