@@ -117,8 +117,9 @@ export default class Linear extends View {
     this.tab = "all";
     this.query = "";
     this.sel = 0;
-    this.mode = "list"; // list | detail
-    this.stack = []; // issues followed through relations in the detail view
+    const opening = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(String(props()?.open ?? "")) ? String(props().open).toUpperCase() : null;
+    this.mode = opening ? "detail" : "list"; // list | detail
+    this.stack = opening ? [opening] : []; // issues followed through relations in the detail view
     this.sc = {}; // issue id → the detail's scroll: offset, measured heights, outline state
     this.places = new Places();
     this.canWrite = false;
