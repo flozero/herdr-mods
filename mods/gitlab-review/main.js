@@ -134,8 +134,8 @@ export default class GitlabReview extends View {
     this.user = null;
     this.mrs = [];
     this.authored = [];
-    this.person = null;
-    this.personMrs = null;
+    this.someone = null;
+    this.someoneMrs = null;
     this.stackParents = {};
     this.health = {};
     this.sel = 0;
@@ -254,7 +254,7 @@ export default class GitlabReview extends View {
     if (this.listTab === "mine") return this.authored.filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, own: true }));
     if (this.listTab === "ignored") return shown.filter((m) => this.ignored[m.iid]).map((m) => ({ m, ignored: true }));
     if (this.listTab === "merged") return (this.merged ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, merged: true }));
-    if (this.listTab === "person") return (this.personMrs ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false }));
+    if (this.listTab === "person") return (this.someoneMrs ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false }));
     const live = shown.filter((m) => !this.ignored[m.iid]);
     return [
       ...live.filter((m) => this.replied[m.iid]).map((m) => ({ m, ignored: false, replied: true })),
@@ -273,20 +273,20 @@ export default class GitlabReview extends View {
   }
 
   async loadPerson(cx) {
-    const who = this.person?.username;
+    const who = this.someone?.username;
     if (!who || this.loading.has("person")) return;
     const mrs = await this.call(cx, "person", () => gl.authored(this.top, who));
-    if (!mrs || this.person?.username !== who) return;
-    this.personMrs = mrs;
+    if (!mrs || this.someone?.username !== who) return;
+    this.someoneMrs = mrs;
     await this.loadParents(cx, mrs);
     cx.notify();
   }
 
   pickAuthor(u, cx) {
     this.closePeople(cx);
-    if (this.person?.username !== u.username) {
-      this.person = { username: u.username, name: u.name };
-      this.personMrs = null;
+    if (this.someone?.username !== u.username) {
+      this.someone = { username: u.username, name: u.name };
+      this.someoneMrs = null;
       this.sel = 0;
       this.anchor = null;
       cx.spawn(async (cx) => this.loadPerson(cx));
@@ -313,8 +313,8 @@ export default class GitlabReview extends View {
     this.editor = saved.app ?? null;
     this.split = Boolean(prefs.split);
     if (LIST_TABS.includes(prefs.listTab)) this.listTab = prefs.listTab;
-    if (prefs.person?.username) this.person = prefs.person;
-    if (this.listTab === "person" && this.user && this.person && this.personMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
+    if (prefs.someone?.username) this.someone = prefs.someone;
+    if (this.listTab === "person" && this.user && this.someone && this.someoneMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
     cx.notify();
   }
 
@@ -325,7 +325,7 @@ export default class GitlabReview extends View {
   }
 
   savePrefs(cx) {
-    const prefs = { split: this.split, listTab: this.listTab, person: this.person };
+    const prefs = { split: this.split, listTab: this.listTab, someone: this.someone };
     cx.spawn(async (cx) => {
       try {
         await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", cacheDir()]);
@@ -341,8 +341,8 @@ export default class GitlabReview extends View {
     this.anchor = null;
     if (tab === "merged" && this.merged === null && this.user) cx.spawn(async (cx) => this.loadMerged(cx));
     if (tab === "person" && this.user) {
-      if (!this.person) this.openPeople("author", cx);
-      else if (this.personMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
+      if (!this.someone) this.openPeople("author", cx);
+      else if (this.someoneMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
     }
     this.savePrefs(cx);
     cx.notify();
@@ -356,7 +356,7 @@ export default class GitlabReview extends View {
       review: shown.filter((m) => !this.ignored[m.iid]).length,
       ignored: shown.filter((m) => this.ignored[m.iid]).length,
       merged: this.merged ? this.merged.filter((m) => !q || this.matches(m, q)).length : null,
-      person: this.personMrs ? this.personMrs.filter((m) => !q || this.matches(m, q)).length : null,
+      person: this.someoneMrs ? this.someoneMrs.filter((m) => !q || this.matches(m, q)).length : null,
     };
   }
 
@@ -366,7 +366,7 @@ export default class GitlabReview extends View {
       .children(LIST_TABS.map((tab, n) => {
         const on = this.listTab === tab;
         const count = tab === "merged" && counts.merged === null ? (this.loading.has("merged") ? "…" : "last 30")
-          : tab === "person" ? (this.person ? `@${this.person.username}${counts.person === null ? "" : ` · ${counts.person}`}` : "pick")
+          : tab === "person" ? (this.someone ? `@${this.someone.username}${counts.person === null ? "" : ` · ${counts.person}`}` : "pick")
           : String(counts[tab]);
         return h_flex().id(`lt-${tab}`).h(24).px(10).gap(6).items_center().rounded(12).border_1().text_size(12).cursor_pointer()
           .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
@@ -396,9 +396,7 @@ export default class GitlabReview extends View {
             return;
           }
         }
-        const space = spaces().find((x) => x.folder === path);
-        if (!space) run("space.new", { folder: path, name: path.split("/").pop() });
-        run("tab.new", { name, mod: "gitlab-review", props: { cwd: path, local: true }, ...(space ? { space: space.id } : {}) });
+        await this.openModTab(cx, path, { name, mod: "gitlab-review", props: { cwd: path, local: true } }, created);
         this.say(`${created ? "Worktree created: " : ""}${m.source_branch} opened for review`, cx, "success");
       } catch (e) {
         this.say(`Couldn't open ${m.source_branch}: ${e?.message ?? e}`, cx, "error");
@@ -409,7 +407,23 @@ export default class GitlabReview extends View {
     });
   }
 
-  async openPath(app, path) {
+  async openModTab(cx, path, tab, fresh = false) {
+    let space = spaces().find((x) => x.folder === path);
+    if (space) {
+      const shells = fresh ? space.tabs.filter((x) => panes().every((pane) => pane.tab !== x.id || (!pane.mod && !pane.status))).map((x) => x.id) : [];
+      run("tab.new", { ...tab, space: space.id });
+      for (const id of shells) run("tab.close", { id, confirmed: true });
+      return;
+    }
+    run("space.new", { folder: path, name: path.split("/").pop(), focus: false });
+    for (let i = 0; i < 40 && !(space = spaces().find((x) => x.folder === path)); i++) await new Promise((resolve) => cx.timer.after(50, resolve));
+    if (!space) { run("tab.new", tab); return; }
+    const shell = space.tabs.map((x) => x.id);
+    run("tab.new", { ...tab, space: space.id });
+    for (const id of shell) run("tab.close", { id, confirmed: true });
+  }
+
+  async openPath(app, path, cx, fresh = false) {
     if (app !== HERDR_EDITOR) return openIn(exec, app, path);
     const mod = this.herdrEditor ?? "vscode";
     const name = `${mod === "code" ? "Code" : "VS Code"} · ${path.split("/").pop()}`;
@@ -421,10 +435,7 @@ export default class GitlabReview extends View {
         return { code: 0 };
       }
     }
-    const home = spaces().find((space) => space.folder === path);
-    if (!home) run("space.new", { folder: path, name: path.split("/").pop() });
-    const editorProps = mod === "code" ? { root: path, mode: "changes" } : { folder: path };
-    run("tab.new", { name, mod, props: editorProps, ...(home ? { space: home.id } : {}) });
+    await this.openModTab(cx, path, { name, mod, props: mod === "code" ? { root: path, mode: "changes" } : { folder: path } }, fresh);
     return { code: 0 };
   }
 
@@ -441,7 +452,7 @@ export default class GitlabReview extends View {
     if (this.local) {
       this.editor = app;
       cx.spawn(async (cx) => {
-        const r = await this.openPath(app, this.top);
+        const r = await this.openPath(app, this.top, cx);
         this.say(r.code === 0 ? `${this.top.split("/").pop()} opened in ${app}` : `Couldn't open it in ${app}`, cx, r.code === 0 ? "success" : "error");
       });
       return;
@@ -461,12 +472,12 @@ export default class GitlabReview extends View {
     cx.spawn(async (cx) => {
       try {
         const { path, created, main } = await branchCheckout(exec, this.top, mr.source_branch, home());
-        if (path !== main) {
+        if (created && path !== main) {
           this.say(`Setting up the worktree for ${mr.source_branch}…`, cx);
           const setup = await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: mr.source_branch });
           if (setup.code !== 0) this.say(`Worktree setup failed: ${(setup.stderr || setup.stdout || "").trim().split("\n").pop()}`, cx, "error");
         }
-        const r = await this.openPath(app, path);
+        const r = await this.openPath(app, path, cx, created);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || `${app} didn't open`);
         this.say(`${created ? "Worktree created: " : ""}${mr.source_branch} opened in ${app}`, cx, "success");
       } catch (e) {
@@ -1000,7 +1011,7 @@ export default class GitlabReview extends View {
       await this.findReplies(cx, mrs);
     }
     if (this.merged !== null) await this.loadMerged(cx);
-    if (this.personMrs !== null) await this.loadPerson(cx);
+    if (this.someoneMrs !== null) await this.loadPerson(cx);
     if (this.iid) await this.loadMr(cx, this.iid);
   }
 
@@ -1628,12 +1639,12 @@ export default class GitlabReview extends View {
 
   authorChoices(p) {
     const q = this.peopleInput.value().trim().toLowerCase();
-    const near = [...(this.person ? [this.person] : []), ...[...this.mrs, ...this.authored, ...(this.merged ?? [])].flatMap((m) => [m.author, ...(m.reviewers ?? [])])];
+    const near = [...(this.someone ? [this.someone] : []), ...[...this.mrs, ...this.authored, ...(this.merged ?? [])].flatMap((m) => [m.author, ...(m.reviewers ?? [])])];
     const pool = q && p.found ? [...p.found, ...near] : near;
     const seen = new Set([this.user?.username]);
     return pool.filter((u) => u?.username && !seen.has(u.username) && seen.add(u.username))
       .filter((u) => !q || `${u.username} ${u.name ?? ""}`.toLowerCase().includes(q))
-      .map((u) => ({ username: u.username, name: u.name ?? u.username, on: u.username === this.person?.username }))
+      .map((u) => ({ username: u.username, name: u.name ?? u.username, on: u.username === this.someone?.username }))
       .slice(0, 12);
   }
 
@@ -2414,7 +2425,7 @@ export default class GitlabReview extends View {
       : this.listTab === "mine" ? "You have no open merge request here"
       : this.listTab === "ignored" ? "Nothing ignored: i on a merge request puts it here"
       : this.listTab === "merged" ? (this.merged === null || this.loading.has("merged") ? "Loading…" : "No merged merge request you reviewed")
-      : this.listTab === "person" ? (!this.person ? "Pick someone to see their open merge requests" : this.personMrs === null ? "Loading…" : `${this.person.name} has no open merge request here`)
+      : this.listTab === "person" ? (!this.someone ? "Pick someone to see their open merge requests" : this.someoneMrs === null ? "Loading…" : `${this.someone.name} has no open merge request here`)
       : this.mrs.length ? "Nothing left: everything else is ignored" : "No open merge request waits on your review here";
     if (!rows.length) items.push(div().px(16).py(10).text_size(12).text_color(t.dim).child(empty));
     return v_flex().id("glr-list").flex_1().min_h(0).pt(4).pb(80).overflow_y_scrollbar().children(items);
@@ -2424,10 +2435,10 @@ export default class GitlabReview extends View {
     const picking = this.peoplePick?.kind === "author";
     return v_flex().id("person-bar").px(12).pt(6).pb(4).gap(6)
       .child(h_flex().gap(8).items_center()
-        .when(Boolean(this.person), (el) => el.child(this.avatar(t, this.person.name, 20))
-          .child(div().text_size(12.5).text_color(t.foreground).child(this.person.name))
-          .child(div().text_size(11).text_color(t.dim).child(`@${this.person.username}`)))
-        .child(this.button(t, "person-pick", picking ? "Close  Esc" : this.person ? "Someone else  P" : "Pick someone  P", (cx) => this.openPeople("author", cx))))
+        .when(Boolean(this.someone), (el) => el.child(this.avatar(t, this.someone.name, 20))
+          .child(div().text_size(12.5).text_color(t.foreground).child(this.someone.name))
+          .child(div().text_size(11).text_color(t.dim).child(`@${this.someone.username}`)))
+        .child(this.button(t, "person-pick", picking ? "Close  Esc" : this.someone ? "Someone else  P" : "Pick someone  P", (cx) => this.openPeople("author", cx))))
       .when(picking, (el) => el.child(this.peoplePicker(t)));
   }
 
