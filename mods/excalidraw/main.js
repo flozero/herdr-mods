@@ -6175,6 +6175,67 @@ var Excalidraw = class extends View {
     this.rebuild(cx);
   }
   // ---- keys --------------------------------------------------------------------------
+  copied() {
+    const map = this.map();
+    return [...this.withBoundText(this.selected)].map((id) => map.get(id)).filter(Boolean);
+  }
+  copySelection(cx, cut) {
+    const els = this.copied();
+    if (!els.length) return;
+    cx.write_to_clipboard(JSON.stringify({ type: "excalidraw/clipboard", elements: els }));
+    this.pasteCount = 0;
+    if (cut) {
+      this.history.record(this.scene.getElementsIncludingDeleted());
+      this.deleteIds(new Set(els.map((el) => el.id)));
+      this.markDirty();
+      this.rebuild(cx);
+    }
+  }
+  clone(els, offset) {
+    const ids = new Map(els.map((el) => [el.id, Math.random().toString(36).slice(2, 12) + Date.now().toString(36)]));
+    const groups = new Map();
+    const group = (g) => (groups.has(g) ? groups.get(g) : (groups.set(g, Math.random().toString(36).slice(2, 12)), groups.get(g)));
+    const binding = (b) => (b && ids.has(b.elementId) ? { ...b, elementId: ids.get(b.elementId) } : null);
+    return els.map((el) => ({
+      ...el,
+      id: ids.get(el.id),
+      x: el.x + offset,
+      y: el.y + offset,
+      seed: Math.floor(Math.random() * 2 ** 31),
+      version: 1,
+      versionNonce: Math.floor(Math.random() * 2 ** 31),
+      updated: Date.now(),
+      isDeleted: false,
+      locked: false,
+      groupIds: (el.groupIds ?? []).map(group),
+      containerId: el.containerId ? ids.get(el.containerId) ?? null : null,
+      boundElements: el.boundElements ? el.boundElements.filter((b) => ids.has(b.id)).map((b) => ({ ...b, id: ids.get(b.id) })) : null,
+      ...("startBinding" in el ? { startBinding: binding(el.startBinding) } : {}),
+      ...("endBinding" in el ? { endBinding: binding(el.endBinding) } : {}),
+    }));
+  }
+  insertCopies(els, offset, cx) {
+    const copies = this.clone(els, offset);
+    if (!copies.length) return;
+    this.history.record(this.scene.getElementsIncludingDeleted());
+    this.scene.insertElements(copies);
+    this.tool = "selection";
+    this.selected = new Set(copies.filter((el) => !(el.type === "text" && el.containerId)).map((el) => el.id));
+    this.markDirty();
+    this.rebuild(cx);
+  }
+  pasteClipboard(cx) {
+    let data = null;
+    try { data = JSON.parse(cx.read_from_clipboard() ?? ""); } catch {}
+    const els = data?.type === "excalidraw/clipboard" && Array.isArray(data.elements) ? data.elements.filter((el) => el?.id && el.type) : null;
+    if (!els?.length) return;
+    this.pasteCount = (this.pasteCount ?? 0) + 1;
+    this.insertCopies(els, 20 * this.pasteCount, cx);
+  }
+  duplicateSelection(cx) {
+    const els = this.copied();
+    if (els.length) this.insertCopies(els, 10, cx);
+  }
   onKey(e4, cx) {
     if (this.renaming) {
       if (e4.key === "escape") this.cancelRename(cx);
@@ -6188,6 +6249,9 @@ var Excalidraw = class extends View {
     const map = this.map();
     if (k2 === "cmd-z") return this.undo(cx);
     if (k2 === "cmd-shift-z" || k2 === "cmd-y") return this.redo(cx);
+    if (k2 === "cmd-c" || k2 === "cmd-x") return this.copySelection(cx, k2 === "cmd-x");
+    if (k2 === "cmd-v") return this.pasteClipboard(cx);
+    if (k2 === "ctrl-d") return this.duplicateSelection(cx);
     if (k2 === "cmd-a") {
       this.tool = "selection";
       this.selected = new Set(this.elements().filter((el) => !(el.type === "text" && el.containerId)).map((el) => el.id));
