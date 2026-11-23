@@ -4942,6 +4942,7 @@ var STROKES = ["#1e1e1e", "#e03131", "#2f9e44", "#1971c2", "#f08c00"];
 var BACKGROUNDS = ["transparent", "#ffc9c9", "#b2f2bb", "#a5d8ff", "#ffec99"];
 var FONT_SIZES = [["S", 16], ["M", 20], ["L", 28], ["XL", 36]];
 var SELECTION = "#6965db";
+var HANDLE = 9;
 var UI = { surface: "#ffffff", border: "#e9ecef", swatchBorder: "#ced4da", foreground: "#1e1e1e", muted: "#868e96", selected: "#e0dfff", hover: "#f1f0ff" };
 var RENAME_PALETTE = { accent: SELECTION, blocked: "#e03131", background: "#ffffff", foreground: UI.foreground, muted: UI.muted };
 var MIN_ZOOM = 0.1;
@@ -5206,14 +5207,8 @@ var Excalidraw = class extends View {
   scale() {
     return this.vz * this.herdrZoom();
   }
-  /**
-   * What goes into a path, per scene unit. Herdr zooms every pixel length a mod writes, a
-   * path's points, stroke width and dashes included, exactly as it does a div's left, top and
-   * text size. So a path takes the canvas zoom only: with Herdr's zoom in it too, shapes
-   * were drawn zoom times larger than the text on them, and the text drifted off its shape
-   * further from the origin.
-   */
-  drawScale() {
+  /** Scene units to the lengths a path is written in: the shell applies the Herdr zoom to paths itself. */
+  pathScale() {
     return this.vz;
   }
   toScene(local) {
@@ -5439,7 +5434,7 @@ var Excalidraw = class extends View {
   }
   /** Rebuilds the static layers from every element not drawn live. */
   rebuild(cx) {
-    const scale = this.drawScale();
+    const scale = this.pathScale();
     const els = this.elements().filter((e4) => !this.active.has(e4.id));
     this.layers = buildLayers(els, this.map(), scale, this.shapeOptions());
     this.builtVz = this.vz;
@@ -5466,18 +5461,26 @@ var Excalidraw = class extends View {
   }
   /** Elements being drawn or dragged, the selection outline, the marquee. */
   renderLive() {
-    const s = this.drawScale();
+    const s = this.pathScale();
     const map = this.map();
     const els = [...this.active].map((id) => map.get(id)).filter(Boolean);
     const draw = buildLayers(els, map, s, this.shapeOptions()).flatMap((l) => l.draw);
     const pad = 6 / this.vz;
     const outline = (b, color, dash) => ({ kind: "path", color, path: rectPath((b[0] - pad) * s, (b[1] - pad) * s, (b[2] + pad) * s, (b[3] + pad) * s, 1.5, dash) });
     const selected = [...this.selected].map((id) => map.get(id)).filter(Boolean);
+    const p2 = this.pointer;
     if (!this.editing) {
       for (const el of selected) draw.push(outline(he2(el, map), SELECTION, null));
       if (selected.length > 1) draw.push(outline(tt2(selected), SELECTION, [4, 4]));
+      const box = this.handleBox();
+      if (box && (!p2 || p2.mode === "resize")) {
+        const half = HANDLE / 2 / this.vz;
+        for (const [, hx, hy] of this.handles(box)) {
+          draw.push({ kind: "path", color: "#ffffff", path: rectPath((hx - half) * s, (hy - half) * s, (hx + half) * s, (hy + half) * s, 0) });
+          draw.push({ kind: "path", color: SELECTION, path: rectPath((hx - half) * s, (hy - half) * s, (hx + half) * s, (hy + half) * s, 1.5) });
+        }
+      }
     }
-    const p2 = this.pointer;
     if (p2?.mode === "marquee") {
       const [x1, x2] = [Math.min(p2.start.x, p2.cur.x), Math.max(p2.start.x, p2.cur.x)];
       const [y1, y22] = [Math.min(p2.start.y, p2.cur.y), Math.max(p2.start.y, p2.cur.y)];
@@ -5770,7 +5773,77 @@ var Excalidraw = class extends View {
     this.pointer = { mode: "create", id: el.id, origin: p2, shift: false };
     cx.notify(this.liveView);
   }
+  resizable() {
+    const map = this.map();
+    const els = [...this.selected].map((id) => map.get(id)).filter((el) => el && !el.locked && !(el.type === "text" && el.containerId));
+    return els.length ? els : null;
+  }
+  handleBox() {
+    const els = this.resizable();
+    if (!els) return null;
+    const b = els.length === 1 ? he2(els[0], this.map()) : tt2(els);
+    const pad = 6 / this.vz;
+    return [b[0] - pad, b[1] - pad, b[2] + pad, b[3] + pad];
+  }
+  handles(b) {
+    const [x1, y1, x2, y2] = b, mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+    return [["nw", x1, y1], ["n", mx, y1], ["ne", x2, y1], ["e", x2, my], ["se", x2, y2], ["s", mx, y2], ["sw", x1, y2], ["w", x1, my]];
+  }
+  handleAt(p2) {
+    const box = this.handleBox();
+    if (!box) return null;
+    const reach = HANDLE / this.vz;
+    return this.handles(box).find(([, hx, hy]) => Math.abs(p2.x - hx) <= reach && Math.abs(p2.y - hy) <= reach)?.[0] ?? null;
+  }
+  startResize(handle, cx) {
+    const els = this.resizable();
+    const pad = 6 / this.vz;
+    const map = this.map();
+    const b = els.length === 1 ? he2(els[0], map) : tt2(els);
+    this.history.record(this.scene.getElementsIncludingDeleted());
+    const ids = this.withBoundText(new Set(els.map((el) => el.id)));
+    const live = new Set(ids);
+    for (const id of ids) for (const bound of map.get(id)?.boundElements ?? []) if (bound.type === "arrow") live.add(bound.id);
+    this.active = live;
+    this.pointer = { mode: "resize", handle, box: b, pad, items: els.map((el) => ({ id: el.id, x: el.x, y: el.y, width: el.width, height: el.height, points: el.points ? el.points.map((q3) => [...q3]) : null, fontSize: el.fontSize })) };
+    this.rebuild(cx);
+  }
+  resizeSelection(p2, keepRatio, cx) {
+    const ptr = this.pointer, h2 = ptr.handle, [bx1, by1, bx2, by2] = ptr.box;
+    const w0 = Math.max(bx2 - bx1, 1), h0 = Math.max(by2 - by1, 1);
+    let x1 = bx1, y1 = by1, x2 = bx2, y2 = by2;
+    if (h2.includes("w")) x1 = Math.min(p2.x + ptr.pad, bx2 - 1);
+    if (h2.includes("e")) x2 = Math.max(p2.x - ptr.pad, bx1 + 1);
+    if (h2.includes("n")) y1 = Math.min(p2.y + ptr.pad, by2 - 1);
+    if (h2.includes("s")) y2 = Math.max(p2.y - ptr.pad, by1 + 1);
+    let sx = (x2 - x1) / w0, sy = (y2 - y1) / h0;
+    const texts = ptr.items.every((it) => this.scene.getElement(it.id)?.type === "text");
+    if (keepRatio || texts) {
+      const k = h2.length === 2 ? Math.max(sx, sy) : h2 === "n" || h2 === "s" ? sy : sx;
+      sx = sy = k;
+      if (h2.includes("w")) x1 = bx2 - w0 * k; else x2 = bx1 + w0 * k;
+      if (h2.includes("n")) y1 = by2 - h0 * k; else y2 = by1 + h0 * k;
+    }
+    const moved = [];
+    for (const it of ptr.items) {
+      const el = this.scene.getElement(it.id);
+      if (!el) continue;
+      const change = { x: x1 + (it.x - bx1) * sx, y: y1 + (it.y - by1) * sy, width: it.width * sx, height: it.height * sy };
+      if (it.points) change.points = it.points.map(([px3, py3]) => [px3 * sx, py3 * sy]);
+      if (el.type === "text" && it.fontSize) change.fontSize = it.fontSize * sy;
+      this.scene.mutateElement(el, change, { informMutation: false, isDragging: true });
+      moved.push(el);
+      for (const bound of el.boundElements ?? []) {
+        const text = bound.type === "text" ? this.scene.getElement(bound.id) : null;
+        if (text) ga(text, el, this.scene);
+      }
+    }
+    for (const el of moved) if (el.boundElements?.some((b) => b.type === "arrow")) Xe2(el, this.scene, { simultaneouslyUpdated: moved });
+    cx.notify(this.liveView);
+  }
   selectDown(e4, p2, cx) {
+    const handle = !e4.modifiers?.shift && e4.click_count < 2 ? this.handleAt(p2) : null;
+    if (handle) return this.startResize(handle, cx);
     let hit = this.hit(p2);
     if (e4.click_count >= 2) {
       if (hit?.type === "text") return this.startText(p2, hit, cx);
@@ -5821,6 +5894,7 @@ var Excalidraw = class extends View {
       return;
     }
     if (ptr.mode === "move") return this.moveSelection(p2, cx);
+    if (ptr.mode === "resize") return this.resizeSelection(p2, e4.modifiers?.shift, cx);
     if (ptr.mode === "create") return this.resizeNew(p2, e4.modifiers?.shift, cx);
   }
   eraseAt(p2) {
@@ -5906,6 +5980,12 @@ var Excalidraw = class extends View {
         this.markDirty();
       }
       this.rebuild(cx);
+      return;
+    }
+    if (ptr.mode === "resize") {
+      this.active = /* @__PURE__ */ new Set();
+      this.rebuild(cx);
+      this.markDirty();
       return;
     }
     if (ptr.mode === "move") {
