@@ -71,7 +71,7 @@ export class LspClient {
       workspaceFolders: [{ uri: fileUri(root), name: root.split("/").pop() }],
       capabilities: {
         general: { positionEncodings: ["utf-16"] },
-        workspace: { configuration: true, workspaceFolders: true },
+        workspace: { configuration: true, workspaceFolders: true, workspaceEdit: { documentChanges: true } },
         textDocument: {
           synchronization: { didSave: true },
           completion: {
@@ -80,6 +80,7 @@ export class LspClient {
           },
           hover: { contentFormat: ["markdown", "plaintext"] },
           definition: { linkSupport: true },
+          rename: { prepareSupport: false },
           publishDiagnostics: {},
         },
       },

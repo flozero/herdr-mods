@@ -1,10 +1,10 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, v_virtual_list } from "gpui-base";
 import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile, closeOverlay, run, watchFolder } from "herdr";
 import { launch, fileUri, uriPath } from "./lsp.js";
-import { branchDiff, agentLabel } from "./review/local.js";
+import { branchDiff, workingDiff, commitGraph, commitDiff, agentLabel } from "./review/local.js";
 import { lineDiff } from "./review/diff.js";
-import { findReview, publishReview } from "./review/forge.js";
+import { findReview, publishReview, reviewThreads, replyThread, resolveThread } from "./review/forge.js";
 import { AgentSession, CHANGE_COLORS, COMMENT_COLOR, changeAt, changeHighlights, lineRange, reviewPrompt, where } from "./review/review.js";
 
 const MONO = "JetBrains Mono";
@@ -13,8 +13,15 @@ const SIDE_W = 300;
 const SIDE_MIN = 160;
 const SIDE_MAX = 900;
 const REFERENCES_LIMIT = 500;
+const SYMBOL_LIMIT = 200;
+const SYMBOL_KINDS = ["", "file", "module", "namespace", "package", "class", "method", "property", "field", "constructor", "enum", "interface",
+  "function", "variable", "constant", "string", "number", "boolean", "array", "object", "key", "null", "enum member", "struct", "event", "operator", "type"];
 const MOD_DIR = () => `${appHome()}/mods/code`;
 const CACHE_DIR = () => `${home()}/.cache/herdr-code`;
+const COMMENTS_FILE = () => `${CACHE_DIR()}/comments.json`;
+const readComments = async () => {
+  try { return JSON.parse((await readTextFile(COMMENTS_FILE())) ?? "{}") ?? {}; } catch { return {}; }
+};
 const SERVERS_DIR = () => `${CACHE_DIR()}/servers`;
 const stop = (_e, cx) => cx.stop_propagation();
 
@@ -33,6 +40,9 @@ const ACTIONS = [
   { id: "references", key: "shift-f12", label: "Show where it is used", run: (view) => view.findReferences() },
   { id: "back", key: "ctrl--", label: "Go back", run: (view) => view.goBack() },
   { id: "forward", key: "ctrl-=", aliases: ["ctrl-+", "ctrl-shift-="], label: "Go forward", run: (view) => view.goForward() },
+  { id: "threads", key: "ctrl-alt-m", label: "Show or hide the MR comments in the code", run: (view) => view.toggleThreads() },
+  { id: "resolveThread", key: "ctrl-alt-r", label: "Resolve or reopen the MR thread under the cursor", run: (view) => view.resolveAtCursor() },
+  { id: "foldThread", key: "ctrl-alt-h", label: "Hide or show the MR thread under the cursor", run: (view) => view.foldAtCursor() },
   { id: "nextChange", key: "ctrl-alt-down", label: "Next change", run: (view) => view.stepChange(1) },
   { id: "previousChange", key: "ctrl-alt-up", label: "Previous change", run: (view) => view.stepChange(-1) },
   { id: "nextTab", key: "ctrl-alt-right", label: "Next tab", run: (view) => view.cycleTab(1) },
@@ -147,6 +157,25 @@ const DIFF_DELETED = "#ef44441a";
 const DELETED_MARK = "\u2212 ";
 const LIVE_DIFF_DELAY = 120;
 const DIFF_ADDED = "#22c55e12";
+const COMMIT_ROWS = 20000;
+const GRAPH_ROW = 22;
+const DIFF_ROW = 18;
+const laneRuns = (graph) => {
+  const runs = [];
+  [...graph].forEach((char, column) => {
+    const lane = column >> 1;
+    const text = char === " " ? "\u00a0" : char === "*" ? "●" : char;
+    const last = runs[runs.length - 1];
+    if (last && (last.lane === lane || char === " ")) last.text += text;
+    else runs.push({ lane, text });
+  });
+  return runs;
+};
+const LANE_COLORS = ["#3b82f6", "#f59e0b", "#a855f7", "#14b8a6", "#ef4444", "#84cc16"];
+const NOTE_MARK = "\u2503 ";
+const NOTE_BG = "#f59e0b1c";
+const NOTE_LINES = 40;
+const isVirtual = (line) => line.startsWith(DELETED_MARK) || line.startsWith(NOTE_MARK);
 const FIND_COLOR = "#eab30840";
 const FIND_CURRENT_COLOR = "#eab308";
 
@@ -198,6 +227,41 @@ const fuzzyScore = (haystack, query) => {
     at = found;
   }
   return score + (haystack.endsWith(query) ? -50 : 0) + haystack.length / 100;
+};
+
+const workspaceEdits = (edit) => {
+  const byPath = new Map();
+  const add = (uri, edits) => {
+    if (!String(uri).startsWith("file://") || !edits?.length) return;
+    const path = uriPath(uri);
+    byPath.set(path, [...(byPath.get(path) ?? []), ...edits]);
+  };
+  for (const change of edit?.documentChanges ?? []) {
+    if (change.kind) throw new Error(`the rename also wants to ${change.kind} files, not supported here`);
+    add(change.textDocument.uri, change.edits);
+  }
+  if (!edit?.documentChanges) for (const [uri, edits] of Object.entries(edit?.changes ?? {})) add(uri, edits);
+  return byPath;
+};
+
+const wordIndex = (text, name, from) => {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const found = new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`, "g");
+  found.lastIndex = from;
+  return found.exec(text)?.index ?? -1;
+};
+
+const shiftedPosition = (position, edits) => {
+  const before = edits.filter((edit) => edit.range.start.line === position.line && edit.range.end.line === position.line
+    && edit.range.end.character <= position.character);
+  const delta = before.reduce((sum, edit) => sum + (edit.newText ?? "").length - (edit.range.end.character - edit.range.start.character), 0);
+  return { line: position.line, character: position.character + delta };
+};
+
+const applyTextEdits = (text, edits) => {
+  const ranges = edits.map((edit) => ({ start: offsetOf(text, edit.range.start), end: offsetOf(text, edit.range.end), newText: edit.newText ?? "" }))
+    .sort((a, b) => b.start - a.start || b.end - a.end);
+  return ranges.reduce((out, { start, end, newText }) => out.slice(0, start) + newText + out.slice(end), text);
 };
 
 const positionOf = (text, offset) => {
@@ -318,6 +382,12 @@ export default class Code extends View {
     this.grepInput = InputState.new({ placeholder: "Find in the project" });
     this.grepInput.on("change", () => this.queueGrep(GREP_DEBOUNCE));
     this.grepInput.on("submit", () => this.queueGrep(0));
+    this.searchTab = "text";
+    this.symbol = { current: null, items: [], loading: false, results: [], searching: false, renaming: false, message: "", seq: 0, selected: null };
+    this.symbolInput = InputState.new({ placeholder: "Find a symbol by name" });
+    this.symbolInput.on("change", () => this.queueSymbolSearch());
+    this.renameInput = InputState.new({ placeholder: "Rename to" });
+    this.renameInput.on("submit", () => this.renameSymbol());
     this.replaceInput = InputState.new({ placeholder: "Replace with" });
     this.replaceInput.on("submit", () => this.acceptMatch());
     this.peek = null;
@@ -337,9 +407,17 @@ export default class Code extends View {
     this.sidebarShown = true;
     this.mode = "files";
     this.changes = null;
+    this.working = null;
+    this.scope = "all";
+    this.graph = null;
+    this.graphLoading = false;
+    this.commit = null;
     this.changedPaths = new Map();
     this.changesLoading = false;
     this.comments = [];
+    this.threads = [];
+    this.threadsShown = true;
+    this.foldToggled = new Set();
     this.review = null;
     this.publishing = false;
     this.composer = null;
@@ -412,6 +490,10 @@ export default class Code extends View {
     this.sidebarShown = true;
     this.mode = "search";
     const document = this.current;
+    if (this.searchTab === "symbol") {
+      this.pickSymbolAtCursor();
+      return;
+    }
     if (document) {
       const { start, end } = document.state.selected_range();
       const selected = document.state.value().slice(Math.min(start, end), Math.max(start, end));
@@ -419,6 +501,13 @@ export default class Code extends View {
     }
     this.grepInput.focus();
     this.queueGrep(0);
+  }
+
+  setSearchTab(tab) {
+    this.searchTab = tab;
+    if (tab === "symbol") this.pickSymbolAtCursor();
+    else this.grepInput.focus();
+    this.redraw();
   }
 
   queueGrep(delay) {
@@ -699,8 +788,10 @@ export default class Code extends View {
         if (stacked.base === `origin/${this.review.target}`) changes = stacked;
       }
       this.changes = changes;
-      this.changedPaths = new Map(this.changes.files.map((file) => [file.new_path, file.new_file ? "added" : "modified"]));
-      for (const document of this.documents.values()) this.paintChanges(document);
+      this.working = await workingDiff(exec, this.root);
+      await this.loadThreads();
+      this.applyScope();
+      if (this.graph) this.loadGraph();
     } catch (error) {
       this.message = `Changes: ${error?.message ?? error}`;
     }
@@ -747,9 +838,60 @@ export default class Code extends View {
           .child(div().min_w(0).truncate().text_color(t.foreground).child(text.replace(/\t/g, "  ") || " ")))));
   }
 
+  shownChanges() {
+    if (this.scope !== "uncommitted" || !this.changes) return this.changes;
+    return { ...this.changes, ...(this.working ?? { base: "HEAD", fork: null, files: [] }) };
+  }
+
+  applyScope() {
+    const files = this.shownChanges()?.files ?? [];
+    this.changedPaths = new Map(files.map((file) => [file.new_path, file.new_file ? "added" : "modified"]));
+    for (const document of this.documents.values()) this.paintChanges(document);
+    this.peekAt = null;
+    if (this.current) this.updatePeek();
+  }
+
+  setScope(scope) {
+    if (this.scope === scope) return;
+    this.scope = scope;
+    this.applyScope();
+    this.redraw();
+  }
+
+  async loadGraph() {
+    if (this.graphLoading) return;
+    this.graphLoading = true;
+    this.redraw();
+    try {
+      this.graph = await commitGraph(exec, this.root, { refs: this.changes?.base ? [this.changes.base] : [] });
+    } catch (error) {
+      this.message = `Graph: ${error?.message ?? error}`;
+    }
+    this.graphLoading = false;
+    this.redraw();
+  }
+
+  async showCommit(sha) {
+    this.commit = { sha, loading: true };
+    this.redraw();
+    try {
+      const commit = await commitDiff(exec, this.root, sha);
+      if (this.commit?.sha === sha) this.commit = commit;
+    } catch (error) {
+      if (this.commit?.sha === sha) this.commit = null;
+      this.message = `Commit: ${error?.message ?? error}`;
+    }
+    this.redraw();
+  }
+
+  closeCommit() {
+    this.commit = null;
+    this.redraw();
+  }
+
   changedFile(path) {
     const relative = this.relative(path);
-    return this.changes?.files.find((file) => file.new_path === relative) ?? null;
+    return this.shownChanges()?.files.find((file) => file.new_path === relative) ?? null;
   }
 
   paintChanges(document) {
@@ -759,7 +901,7 @@ export default class Code extends View {
 
   async ensureBase(document) {
     const file = this.changedFile(document.path);
-    const fork = this.changes?.fork;
+    const fork = this.shownChanges()?.fork;
     if (!file || !fork) return;
     const key = `${fork}:${file.old_path}`;
     if (document.baseKey === key) return;
@@ -775,7 +917,7 @@ export default class Code extends View {
   }
 
   diffRows(document, file) {
-    if (document.baseText === undefined || document.baseKey !== `${this.changes?.fork}:${file.old_path}`) return file.rows;
+    if (document.baseText === undefined || document.baseKey !== `${this.shownChanges()?.fork}:${file.old_path}`) return file.rows;
     return lineDiff(document.baseText.split("\n"), document.state.value().split("\n"));
   }
 
@@ -804,6 +946,32 @@ export default class Code extends View {
     }
     const out = [];
     const kinds = [];
+    const notes = new Map();
+    const relative = this.relative(document.path);
+    const threadsHere = this.threadsShown ? this.threads.filter((thread) => thread.path === relative) : [];
+    const pushNotes = (line) => {
+      const push = (text, thread) => {
+        out.push(`${NOTE_MARK}${text}`);
+        kinds.push("note");
+        notes.set(out.length - 1, thread);
+      };
+      for (const thread of threadsHere.filter((x) => x.line === line)) {
+        const count = `${thread.notes.length} comment${thread.notes.length > 1 ? "s" : ""}`;
+        if (this.threadFolded(thread)) {
+          push(`${thread.resolved ? "✅ RESOLVED" : "🟠 OPEN"} · ${this.authorLabel(thread.notes[0].author)} · ${count} · hidden, ${this.hint("foldThread")} shows it`, thread);
+          continue;
+        }
+        thread.notes.forEach((note, n) => {
+          const body = note.body.split("\n");
+          const shown = body.length > NOTE_LINES ? [...body.slice(0, NOTE_LINES), "…"] : body;
+          shown.forEach((text, k) => {
+            const head = k === 0 ? `${n === 0 ? `${thread.resolved ? "✅ RESOLVED" : "🟠 OPEN"} · ` : "  ↳ "}${this.authorLabel(note.author)}: ` : "     ";
+            push(`${head}${text}`, thread);
+          });
+        });
+        push(`     cursor on this thread, then ${this.hint("comment")} reply on the MR · ${this.hint("resolveThread")} ${thread.resolved ? "reopen" : "resolve"} · ${this.hint("foldThread")} hide`, thread);
+      }
+    };
     const pushDeleted = (at) => {
       for (const text of deleted.get(at) ?? []) {
         out.push(`${DELETED_MARK}${text}`);
@@ -814,28 +982,30 @@ export default class Code extends View {
       pushDeleted(i + 1);
       out.push(text);
       kinds.push(added.has(i + 1) ? "add" : "ctx");
+      pushNotes(i + 1);
     });
     pushDeleted(lines.length + 1);
     const value = out.join("\n");
     if (!document.diff) {
       const state = EditorState.new({ language: document.language?.syntax ?? extensionOf(document.path), value, font_family: MONO, folding: false });
-      document.diff = { state, value, deleted: out.filter((line) => line.startsWith(DELETED_MARK)) };
+      document.diff = { state, value, deleted: out.filter(isVirtual) };
       state.on("change", () => this.syncFromDiff(document));
       this.applyDiffLsp(document);
     } else if (document.diff.state.value() !== value) {
       const range = this.realRange(document);
       document.diff.value = value;
-      document.diff.deleted = out.filter((line) => line.startsWith(DELETED_MARK));
+      document.diff.deleted = out.filter(isVirtual);
       document.diff.syncing = true;
       document.diff.state.set_value(value);
       document.diff.syncing = false;
       this.selectReal(document, range);
     }
     document.diff.kinds = kinds;
+    document.diff.notes = notes;
     this.labelDiff(document);
     document.diff.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" ? [] : [{
       range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
-      color: kind === "del" ? DIFF_DELETED : DIFF_ADDED,
+      color: kind === "del" ? DIFF_DELETED : kind === "note" ? NOTE_BG : DIFF_ADDED,
     }])));
     return document.diff;
   }
@@ -843,7 +1013,8 @@ export default class Code extends View {
   stepChange(step) {
     const diff = this.current?.diff;
     const kinds = diff?.kinds ?? [];
-    const starts = kinds.flatMap((kind, i) => (kind !== "ctx" && (i === 0 || kinds[i - 1] === "ctx") ? [i] : []));
+    const changed = (kind) => kind === "add" || kind === "del";
+    const starts = kinds.flatMap((kind, i) => (changed(kind) && (i === 0 || !changed(kinds[i - 1])) ? [i] : []));
     if (!starts.length) {
       this.message = "No changes in this file";
       return this.redraw();
@@ -862,7 +1033,7 @@ export default class Code extends View {
     const diff = document.diff;
     if (diff.syncing) return;
     const lines = diff.state.value().split("\n");
-    const deleted = lines.filter((line) => line.startsWith(DELETED_MARK));
+    const deleted = lines.filter(isVirtual);
     if (deleted.length !== diff.deleted.length || deleted.some((line, i) => line !== diff.deleted[i])) {
       if (diff.reverting) return;
       diff.reverting = true;
@@ -872,13 +1043,13 @@ export default class Code extends View {
         diff.state.set_value(diff.value);
         diff.state.set_selected_range({ start: cursor, end: cursor });
         diff.reverting = false;
-        this.message = "Deleted lines can't be edited";
+        this.message = "Deleted lines and comments can't be edited";
         this.redraw();
       });
       return;
     }
     diff.value = lines.join("\n");
-    const real = lines.filter((line) => !line.startsWith(DELETED_MARK)).join("\n");
+    const real = lines.filter((line) => !isVirtual(line)).join("\n");
     if (real !== document.state.value()) {
       document.syncing = true;
       document.state.set_value(real);
@@ -891,8 +1062,8 @@ export default class Code extends View {
   labelDiff(document) {
     let line = 0;
     const lines = document.diff.state.value().split("\n");
-    document.diff.state.set_line_labels(lines.map((text) => (text.startsWith(DELETED_MARK) ? "" : String(++line))));
-    document.diff.state.set_locked_lines(lines.flatMap((text, i) => (text.startsWith(DELETED_MARK) ? [i] : [])));
+    document.diff.state.set_line_labels(lines.map((text) => (isVirtual(text) ? "" : String(++line))));
+    document.diff.state.set_locked_lines(lines.flatMap((text, i) => (isVirtual(text) ? [i] : [])));
   }
 
   applyDiffLsp(document) {
@@ -963,7 +1134,7 @@ export default class Code extends View {
     const lines = document.diff.state.value().split("\n");
     let real = 0;
     for (let i = 0; i < lines.length; i++) {
-      if (lines[i].startsWith(DELETED_MARK)) continue;
+      if (isVirtual(lines[i])) continue;
       if (real === line) return i;
       real++;
     }
@@ -971,7 +1142,7 @@ export default class Code extends View {
   }
 
   realLineOf(document, diffLine) {
-    return document.diff.state.value().split("\n").slice(0, diffLine).filter((line) => !line.startsWith(DELETED_MARK)).length;
+    return document.diff.state.value().split("\n").slice(0, diffLine).filter((line) => !isVirtual(line)).length;
   }
 
 
@@ -985,9 +1156,128 @@ export default class Code extends View {
       .map((comment) => ({ range: lineRange(comment.start, comment.end), color: COMMENT_COLOR, style: "frame" })));
   }
 
+  noteUnderCursor(document) {
+    const diff = document?.diff;
+    if (!diff?.notes) return null;
+    const line = positionOf(diff.state.value(), diff.state.selected_range().start).line;
+    return diff.notes.get(line) ?? null;
+  }
+
+  authorLabel(username) {
+    return username === this.me ? "you" : `@${username}`;
+  }
+
+  threadFolded(thread) {
+    return thread.resolved !== this.foldToggled.has(thread.id);
+  }
+
+  rebuildThreads(thread) {
+    for (const document of this.documents.values()) if (document.diff) this.buildDiff(document);
+    const diff = this.current?.diff;
+    const at = diff?.notes && [...diff.notes].find(([, x]) => x.id === thread?.id)?.[0];
+    if (at !== undefined && at !== null) {
+      const offset = offsetOf(diff.state.value(), { line: at, character: 0 });
+      diff.state.set_selected_range({ start: offset, end: offset });
+    }
+    this.redraw();
+  }
+
+  foldAtCursor() {
+    const thread = this.noteUnderCursor(this.current);
+    if (!thread) {
+      this.message = "Put the cursor on an MR comment first";
+      return this.redraw();
+    }
+    if (this.foldToggled.has(thread.id)) this.foldToggled.delete(thread.id); else this.foldToggled.add(thread.id);
+    this.rebuildThreads(thread);
+  }
+
+  resolveAtCursor() {
+    const thread = this.noteUnderCursor(this.current), review = this.review;
+    if (!thread || !review) {
+      this.message = "Put the cursor on an MR comment first";
+      return this.redraw();
+    }
+    const resolved = !thread.resolved;
+    thread.resolved = resolved;
+    this.foldToggled.delete(thread.id);
+    this.message = resolved ? "Thread resolved" : "Thread reopened";
+    this.rebuildThreads(thread);
+    resolveThread(this.root, review, thread.id, resolved).catch((error) => {
+      thread.resolved = !resolved;
+      this.message = `Couldn't ${resolved ? "resolve" : "reopen"} the thread: ${error?.message ?? error}`;
+      this.rebuildThreads(thread);
+    });
+  }
+
+  toggleThreads() {
+    this.threadsShown = !this.threadsShown;
+    for (const document of this.documents.values()) if (document.diff) this.buildDiff(document);
+    this.message = this.threadsShown ? `${this.threads.length} MR thread${this.threads.length === 1 ? "" : "s"} shown in the code` : "MR comments hidden";
+    this.redraw();
+  }
+
+  async loadThreads() {
+    if (this.review?.kind !== "gitlab") {
+      this.threads = [];
+      return;
+    }
+    if (!this.me) {
+      const me = await exec("glab", ["api", "user"], { cwd: this.root }).catch(() => null);
+      try { this.me = me?.code === 0 ? JSON.parse(me.stdout).username : null; } catch { this.me = null; }
+    }
+    const threads = await reviewThreads(this.root, this.review).catch(() => null);
+    if (!threads) return;
+    this.threads = threads;
+    for (const document of this.documents.values()) if (document.diff) this.buildDiff(document);
+    this.redraw();
+  }
+
+  sendReply() {
+    const reply = this.composer?.reply, review = this.review;
+    const body = this.commentInput.value().trim();
+    if (!reply) return;
+    if (!body) {
+      this.message = "The reply is empty";
+      return this.redraw();
+    }
+    if (!review) {
+      this.message = "No open MR for this branch anymore: the reply isn't posted";
+      return this.redraw();
+    }
+    const note = { id: `pending-${Date.now()}`, author: this.me ?? "?", body };
+    reply.notes = [...reply.notes, note];
+    this.composer = null;
+    for (const document of this.documents.values()) if (document.diff) this.buildDiff(document);
+    this.focusActive(this.current);
+    this.message = `Posting the reply on ${review.name}…`;
+    this.redraw();
+    replyThread(this.root, review, reply.id, body).then(() => {
+      this.message = `Reply posted on ${review.name}`;
+      this.redraw();
+    }, (error) => {
+      reply.notes = reply.notes.filter((x) => x !== note);
+      for (const document of this.documents.values()) if (document.diff) this.buildDiff(document);
+      this.message = `Reply not posted: ${error?.message ?? error}`;
+      this.composer = { ...reply.composer, reply, error: String(error?.message ?? error) };
+      this.commentInput.set_value(body);
+      this.redraw();
+    });
+  }
+
   startComment() {
     const document = this.current;
     if (!document) return;
+    const thread = this.noteUnderCursor(document);
+    if (thread) {
+      const at = { path: thread.path, start: thread.line, end: thread.line };
+      this.composer = { ...at, code: "", reply: thread };
+      thread.composer = at;
+      this.commentInput.set_value("");
+      this.commentInput.focus();
+      this.redraw();
+      return;
+    }
     const text = document.state.value();
     const range = this.realRange(document);
     const start = positionOf(text, range.start).line + 1;
@@ -1006,18 +1296,24 @@ export default class Code extends View {
   }
 
   addComment() {
+    if (this.composer?.reply) return this.sendReply();
     const note = this.commentInput.value().trim();
     if (!this.composer || !note) return;
     this.comments.push({ id: `${Date.now()}-${this.comments.length}`, ...this.composer, note });
+    this.saveComments();
     this.composer = null;
     for (const document of this.documents.values()) this.paintComments(document);
     this.focusActive(this.current);
-    this.message = `${this.comments.length} comment${this.comments.length > 1 ? "s" : ""} ready · ${this.hint("send")} sends the review to ${this.agentName}`;
+    const onThread = this.threads.some((thread) => thread.path === this.comments.at(-1).path && thread.line >= this.comments.at(-1).start && thread.line <= this.comments.at(-1).end);
+    this.message = onThread
+      ? `Kept for ${this.agentName}, not posted on the MR: to reply to the thread, put the cursor on its comment lines, then ${this.hint("comment")}`
+      : `${this.comments.length} comment${this.comments.length > 1 ? "s" : ""} ready · ${this.hint("send")} sends the review to ${this.agentName}`;
     this.redraw();
   }
 
   removeComment(id) {
     this.comments = this.comments.filter((comment) => comment.id !== id);
+    this.saveComments();
     for (const document of this.documents.values()) this.paintComments(document);
     this.redraw();
   }
@@ -1061,6 +1357,7 @@ export default class Code extends View {
     try {
       const { inline, general } = await publishReview(this.root, review, sent, this.changes?.files ?? []);
       this.comments = this.comments.filter((comment) => !sent.includes(comment));
+      this.saveComments();
       for (const document of this.documents.values()) this.paintComments(document);
       this.message = `Published on ${review.label} ${review.name}: ${inline} on their lines${general ? `, ${general} in the review's comment (outside the diff)` : ""}`;
     } catch (error) {
@@ -1084,6 +1381,7 @@ export default class Code extends View {
       const shown = await this.agent.send(reviewPrompt({ branch: this.changes?.branch ?? "HEAD", base: this.changes?.base }, sent));
       if (here) run("pane.focus", { pane: here });
       this.comments = this.comments.filter((comment) => !sent.includes(comment));
+      this.saveComments();
       for (const document of this.documents.values()) this.paintComments(document);
       const count = `${sent.length} comment${sent.length > 1 ? "s" : ""}`;
       this.message = shown ? `Sent ${count}: ${this.agentName} answers on the right` : `Sent ${count}: ${this.agentName} is starting in the background`;
@@ -1093,9 +1391,30 @@ export default class Code extends View {
     this.redraw();
   }
 
+  saveComments() {
+    const root = this.root, comments = this.comments;
+    if (!root) return;
+    const write = (this.savingComments ?? Promise.resolve()).then(async () => {
+      await exec("mkdir", ["-p", CACHE_DIR()]);
+      const all = await readComments();
+      if (comments.length) all[root] = comments; else delete all[root];
+      await writeTextFile(COMMENTS_FILE(), JSON.stringify(all));
+    });
+    this.savingComments = write.catch((error) => {
+      this.message = `Couldn't save the comments: ${error?.message ?? error}`;
+      this.redraw();
+    });
+  }
+
   async loadRoot(folder) {
     const top = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]);
     this.root = top.code === 0 ? top.stdout.trim() : folder;
+    const saved = (await readComments())[this.root];
+    if (Array.isArray(saved) && saved.length && !this.comments.length) {
+      this.comments = saved;
+      for (const document of this.documents.values()) this.paintComments(document);
+      this.message = `${saved.length} comment${saved.length > 1 ? "s" : ""} kept from last time · ${this.hint("send")} sends them to ${this.agentName}`;
+    }
     const listed = await exec("git", ["-C", this.root, "ls-files", "--cached", "--others", "--exclude-standard"]);
     this.files = listed.code === 0 ? listed.stdout.split("\n").filter(Boolean) : [];
     this.lowered = this.files.map((path) => path.toLowerCase());
@@ -1150,6 +1469,7 @@ export default class Code extends View {
   }
 
   async open(path, selection) {
+    this.commit = null;
     const absolute = this.absolute(path);
     let document = this.documents.get(absolute);
     if (!document) {
@@ -1400,6 +1720,161 @@ export default class Code extends View {
     const name = wordAt(text, offset);
     this.references = { name, items: [], loading: true };
     this.redraw();
+    const items = await this.referenceItems(servers, document, position);
+    if (this.references?.name !== name) return;
+    this.references = { name, items, loading: false };
+    this.redraw();
+  }
+
+  async symbolFrom(document, offset) {
+    const servers = (await document.servers) ?? [];
+    const text = document.state.value();
+    const name = wordAt(text, offset);
+    if (!name) return null;
+    return {
+      document, name, position: positionOf(text, offset),
+      finders: servers.filter((server) => server.capabilities.referencesProvider),
+      renamer: servers.find((server) => server.capabilities.renameProvider) ?? null,
+    };
+  }
+
+  async pickSymbolAtCursor() {
+    const document = this.current;
+    if (!document) {
+      this.symbol = { ...this.symbol, message: "Open a file and put the cursor on a symbol, or find one by name" };
+      this.symbolInput.focus();
+      this.redraw();
+      return;
+    }
+    const symbol = await this.symbolFrom(document, this.realRange(document).start);
+    if (!symbol) {
+      this.symbol = { ...this.symbol, message: "No symbol under the cursor: find one by name" };
+      this.symbolInput.focus();
+      this.redraw();
+      return;
+    }
+    this.useSymbol(symbol);
+  }
+
+  useSymbol(symbol) {
+    this.symbol = { ...this.symbol, current: symbol, results: [], searching: false, message: "", selected: null, seq: this.symbol.seq + 1 };
+    this.symbolInput.set_value(symbol.name);
+    this.renameInput.set_value(symbol.name);
+    this.renameInput.focus();
+    this.loadSymbolUses();
+  }
+
+  async loadSymbolUses() {
+    const symbol = this.symbol.current;
+    if (!symbol) return;
+    if (!symbol.finders.length) {
+      this.symbol = { ...this.symbol, items: [], loading: false, message: "No language server finds the uses in this file" };
+      this.redraw();
+      return;
+    }
+    this.symbol = { ...this.symbol, loading: true };
+    this.redraw();
+    const items = await this.referenceItems(symbol.finders, symbol.document, symbol.position);
+    if (this.symbol.current !== symbol) return;
+    this.symbol = { ...this.symbol, items, loading: false };
+    this.redraw();
+  }
+
+  queueSymbolSearch() {
+    const query = this.symbolInput.value().trim();
+    const seq = this.symbol.seq + 1;
+    this.symbol.seq = seq;
+    if (!query || query === this.symbol.current?.name) {
+      this.symbol = { ...this.symbol, results: [], searching: false };
+      this.redraw();
+      return;
+    }
+    this.symbol.searching = true;
+    this.redraw();
+    this.cx.timer.after(GREP_DEBOUNCE, () => {
+      if (seq === this.symbol.seq) this.searchSymbols(query, seq);
+    });
+  }
+
+  async searchSymbols(query, seq) {
+    const servers = (await Promise.all([...this.servers.values()].map((server) => Promise.resolve(server).catch(() => null))))
+      .filter((server) => server?.capabilities?.workspaceSymbolProvider);
+    if (!servers.length) {
+      if (seq !== this.symbol.seq) return;
+      this.symbol = { ...this.symbol, results: [], searching: false, message: "No language server is running: open a file of the project first" };
+      this.redraw();
+      return;
+    }
+    const answers = await Promise.all(servers.map((server) => server.client.request("workspace/symbol", { query }).catch(() => null)));
+    if (seq !== this.symbol.seq) return;
+    const root = `${this.root}/`;
+    const results = answers.flatMap((answer) => (Array.isArray(answer) ? answer : []))
+      .filter((found) => found?.location?.range && uriPath(String(found.location.uri)).startsWith(root))
+      .slice(0, SYMBOL_LIMIT)
+      .map((found) => ({ name: found.name, kind: SYMBOL_KINDS[found.kind] ?? "", container: found.containerName ?? "",
+        path: uriPath(found.location.uri), line: found.location.range.start.line, character: found.location.range.start.character }));
+    this.symbol = { ...this.symbol, results, searching: false, message: results.length ? "" : `No symbol named ${query}` };
+    this.redraw();
+  }
+
+  async chooseSymbol(found) {
+    await this.open(found.path, { line: found.line, character: found.character });
+    const document = this.documents.get(found.path);
+    if (!document) return;
+    const text = document.state.value();
+    const from = offsetOf(text, { line: found.line, character: found.character });
+    const at = wordIndex(text, found.name, from);
+    const symbol = await this.symbolFrom(document, at < 0 ? from : at);
+    if (symbol) this.useSymbol(symbol);
+  }
+
+  async renameSymbol() {
+    const symbol = this.symbol.current;
+    const newName = this.renameInput.value().trim();
+    if (!symbol || this.symbol.renaming || !newName || newName === symbol.name) return;
+    if (!symbol.renamer) {
+      this.symbol = { ...this.symbol, message: "No language server renames symbols in this file" };
+      this.redraw();
+      return;
+    }
+    this.symbol.renaming = true;
+    this.redraw();
+    const { document, renamer, position, name } = symbol;
+    try {
+      const edit = await renamer.client.request("textDocument/rename", { textDocument: { uri: document.uri }, position, newName });
+      const byPath = workspaceEdits(edit);
+      if (!byPath.size) throw new Error(`${renamer.name} found nothing to rename`);
+      let count = 0;
+      for (const [path, edits] of byPath) {
+        const open = this.documents.get(path);
+        const before = open ? open.state.value() : await readTextFile(path).catch(() => null);
+        if (before === null) continue;
+        const text = applyTextEdits(before, edits);
+        count += edits.length;
+        if (text === before) continue;
+        if (open) {
+          const wasDirty = open.dirty;
+          const { start } = open.state.selected_range();
+          open.state.set_selected_range({ start: 0, end: before.length });
+          open.state.replace(text);
+          open.state.set_selected_range({ start: Math.min(start, text.length), end: Math.min(start, text.length) });
+          if (!wasDirty) await this.saveDocument(open);
+        } else {
+          await writeTextFile(path, text, before);
+        }
+      }
+      this.message = `Renamed ${name} to ${newName}: ${count} place${count === 1 ? "" : "s"} in ${byPath.size} file${byPath.size === 1 ? "" : "s"}`;
+      const moved = { ...symbol, name: newName, position: shiftedPosition(position, byPath.get(document.path) ?? []) };
+      this.symbol.renaming = false;
+      this.useSymbol(moved);
+      this.loadChanges();
+    } catch (error) {
+      this.symbol = { ...this.symbol, renaming: false, message: `Not renamed: ${error?.message ?? error}` };
+    }
+    this.redraw();
+  }
+
+  async referenceItems(servers, document, position) {
     const answers = await Promise.all(servers.map((server) => server.client
       .request("textDocument/references", { textDocument: { uri: document.uri }, position, context: { includeDeclaration: true } })
       .catch(() => null)));
@@ -1419,10 +1894,77 @@ export default class Code extends View {
       const line = texts.get(path).split("\n")[location.range.start.line] ?? "";
       items.push({ path, line: location.range.start.line, character: location.range.start.character, end: location.range.end, text: line.trim() });
     }
-    items.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
-    if (this.references?.name !== name) return;
-    this.references = { name, items, loading: false };
-    this.redraw();
+    return items.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
+  }
+
+  searchTabs(t) {
+    const tab = (id, label) => div().id(`search-tab-${id}`).flex_1().h(22).flex().items_center().justify_center().rounded(5).text_size(11.5).cursor_pointer()
+      .text_color(this.searchTab === id ? t.foreground : t.dim)
+      .when(this.searchTab === id, (el) => el.bg(t.selected))
+      .when(this.searchTab !== id, (el) => el.hover((st) => st.bg(t.hover)))
+      .on_mouse_down("left", stop).on_click(() => this.setSearchTab(id))
+      .child(label);
+    return h_flex().flex_none().mx(8).mt(8).p(2).gap(2).rounded(6).border_1().border_color(t.border)
+      .child(tab("text", "Text"))
+      .child(tab("symbol", "Symbol"));
+  }
+
+  symbolView(t) {
+    const { current, items, loading, results, searching, renaming, message, selected } = this.symbol;
+    const typed = this.symbolInput.value().trim();
+    const browsing = Boolean(typed) && typed !== current?.name;
+    const rows = [];
+    if (browsing) {
+      results.forEach((found, i) => rows.push(this.row(t, `symbol-found-${i}`, 0, false)
+        .on_click(() => this.chooseSymbol(found))
+        .child(div().flex_none().text_size(10).text_color(t.dim).child(found.kind))
+        .child(div().flex_none().child(found.name))
+        .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim)
+          .child(`${found.container ? `${found.container} · ` : ""}${this.relative(found.path)}:${found.line + 1}`))));
+    } else {
+      let last = null;
+      items.forEach((item, i) => {
+        if (item.path !== last) {
+          last = item.path;
+          const relative = this.relative(item.path);
+          rows.push(h_flex().px(10).pt(6).pb(2).gap(6).items_center().min_w(0).text_size(11.5)
+            .child(iconElement(fileIcon(item.path), t.dim))
+            .child(div().min_w(0).truncate().child(basename(item.path)))
+            .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(relative.slice(0, -basename(item.path).length - 1)))
+            .child(div().flex_1())
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(items.filter((other) => other.path === item.path).length))));
+        }
+        rows.push(this.row(t, `symbol-use-${i}`, 1, item === selected)
+          .on_click(() => {
+            this.symbol.selected = item;
+            this.goToReference(item);
+          })
+          .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(item.line + 1)))
+          .child(div().flex_1().min_w(0).truncate().child(item.text)));
+      });
+    }
+    const files = new Set(items.map((item) => item.path)).size;
+    const count = browsing ? (searching ? "Searching…" : `${results.length}${results.length >= SYMBOL_LIMIT ? "+" : ""} symbol${results.length === 1 ? "" : "s"}`)
+      : current ? (loading ? "Looking for the uses…" : `${items.length} use${items.length === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}`) : "";
+    const canRename = Boolean(current?.renamer) && !renaming && !browsing;
+    return v_flex().flex_1().min_h(0).min_w(0)
+      .child(v_flex().flex_none().px(10).py(8).gap(6).border_b(1).border_color(t.border)
+        .child(Input.new(this.symbolInput).h(28).text_size(12.5))
+        .when(Boolean(current) && !browsing, (el) => el
+          .child(Input.new(this.renameInput).h(28).text_size(12.5))
+          .child(h_flex().gap(6).items_center()
+            .child(div().id("symbol-rename").px(8).h(22).flex().items_center().rounded(5).text_size(11.5).border_1().border_color(t.border)
+              .when(canRename, (el) => el.cursor_pointer().hover((st) => st.bg(t.hover)).on_click(() => this.renameSymbol()))
+              .when(!canRename, (el) => el.text_color(t.dim))
+              .on_mouse_down("left", stop).child(renaming ? "Renaming…" : "Rename"))
+            .child(div().id("symbol-cursor").px(8).h(22).flex().items_center().rounded(5).text_size(11.5).border_1().border_color(t.border)
+              .cursor_pointer().hover((st) => st.bg(t.hover)).on_mouse_down("left", stop).on_click(() => this.pickSymbolAtCursor())
+              .child("At cursor"))
+            .child(div().flex_1())
+            .child(div().flex_none().text_size(10.5).text_color(t.dim).child(count))))
+        .when(browsing || !current, (el) => el.child(h_flex().child(div().flex_1()).child(div().flex_none().text_size(10.5).text_color(t.dim).child(count))))
+        .when(Boolean(message), (el) => el.child(div().text_size(11).text_color(t.dim).child(message))))
+      .child(v_flex().id("symbol-results").flex_1().min_h(0).pb(4).overflow_y_scrollbar().children(rows));
   }
 
   async goToReference(item) {
@@ -1433,7 +1975,7 @@ export default class Code extends View {
     const start = { line: item.line, character: item.character };
     document.state.set_highlights("reference", [{ range: { start: { line: item.line, character: 0 }, end: { line: item.line + 1, character: 0 } }, color: REFERENCE_COLOR }]);
     this.referenceMark = document;
-    this.references.selected = item;
+    if (this.references) this.references.selected = item;
     this.cx.timer.after(30, () => {
       const text = document.state.value();
       this.selectReal(document, { start: offsetOf(text, start), end: offsetOf(text, item.end ?? start) });
@@ -1695,6 +2237,7 @@ export default class Code extends View {
     if (action) action.run(this);
     else if (key === "shift-enter" && this.findOpen) this.findStep(-1);
     else if (key === "escape" && this.references) this.closeReferences();
+    else if (key === "escape" && this.commit) this.closeCommit();
     else if (key === "escape" && this.findOpen) this.closeFind();
     else if (key === "escape" && this.shortcutsShown) this.toggleShortcuts();
     else if (key === "escape" && this.composer) this.cancelComment();
@@ -1736,22 +2279,24 @@ export default class Code extends View {
 
   sidebar(t) {
     const currentPath = this.current ? this.relative(this.current.path) : null;
-    const changed = this.changes?.files.length ?? 0;
+    const changed = this.shownChanges()?.files.length ?? 0;
     const head = h_flex().h(32).flex_none().px(6).gap(2).items_center().border_b(1).border_color(t.border)
       .child(this.modeButton(t, "files", "Files"))
       .child(this.modeButton(t, "changes", changed ? `Changes ${changed}` : "Changes"))
       .child(this.modeButton(t, "search", "Search"))
+      .child(this.modeButton(t, "graph", "Graph"))
       .child(div().flex_1())
-      .when(this.mode === "changes", (el) => el.child(div().id("changes-refresh").px(6).rounded(4).text_size(12).text_color(t.dim)
+      .when(this.mode === "changes" || this.mode === "graph", (el) => el.child(div().id("changes-refresh").px(6).rounded(4).text_size(12).text_color(t.dim)
         .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click(() => this.loadChanges())
-        .child(this.changesLoading ? "…" : "↻")));
+        .child(this.changesLoading || this.graphLoading ? "…" : "↻")));
     const side = v_flex().relative().w(this.sideWidth).flex_none().min_h(0).min_w(0).overflow_hidden().border_r(1).border_color(t.border)
       .child(div().id("side-resize").absolute().top(0).bottom(0).right(0).w(5).cursor_col_resize().hover((s) => s.bg(t.accent))
         .when(Boolean(this.resizing), (el) => el.bg(t.accent))
         .on_mouse_down("left", (e, cx) => this.startResize(e, cx)))
       .child(head);
     if (this.mode === "changes") return side.child(this.changesView(t, currentPath)).child(this.reviewPanel(t));
-    if (this.mode === "search") return side.child(this.grepView(t));
+    if (this.mode === "search") return side.child(this.searchTabs(t)).child(this.searchTab === "symbol" ? this.symbolView(t) : this.grepView(t));
+    if (this.mode === "graph") return side.child(this.graphView(t));
     return side
       .child(h_flex().h(40).flex_none().px(10).items_center().border_b(1).border_color(t.border)
         .child(Input.new(this.finder).flex_1().h(28).text_size(12.5)))
@@ -1799,17 +2344,128 @@ export default class Code extends View {
       .on_mouse_down("left", stop)
       .on_click(() => {
         this.mode = mode;
+        if (mode === "graph" && !this.graph) this.loadGraph();
         this.redraw();
       })
       .child(label);
   }
 
+  scopeButton(t, scope, label, count) {
+    const active = this.scope === scope;
+    return div().id(`scope-${scope}`).flex_1().h(22).flex().items_center().justify_center().rounded(5).text_size(11.5).cursor_pointer()
+      .text_color(active ? t.foreground : t.dim)
+      .when(active, (el) => el.bg(t.selected))
+      .when(!active, (el) => el.hover((s) => s.bg(t.hover)))
+      .on_mouse_down("left", stop)
+      .on_click(() => this.setScope(scope))
+      .child(count == null ? label : `${label} ${count}`);
+  }
+
+  graphView(t) {
+    if (!this.graph) return v_flex().flex_1().min_h(0).child(div().px(12).py(8).text_size(12).text_color(t.dim).child(this.graphLoading ? "Reading the history…" : "No history"));
+    const graph = this.graph;
+    const selected = this.commit?.sha;
+    const keyOf = (index) => graph[index].sha ?? `line-${index}`;
+    const render = (range) => graph.slice(range.start, range.end).map((entry) => {
+      const lanes = h_flex().flex_none().font_family(MONO).text_size(11.5)
+        .children(laneRuns(entry.graph).map(({ text, lane }) => div().text_color(LANE_COLORS[lane % LANE_COLORS.length]).child(text)));
+      const row = h_flex().h(GRAPH_ROW).mx(4).px(6).gap(6).min_w(0).overflow_hidden().items_center().rounded(5).text_size(11.5).child(lanes);
+      if (!entry.sha) return row;
+      return row.cursor_pointer().hover((st) => st.bg(t.hover))
+        .when(entry.sha === selected, (el) => el.bg(t.selected))
+        .child(div().flex_none().font_family(MONO).text_size(10.5).text_color(t.dim).child(entry.short))
+        .children(entry.refs.map((ref) => div().flex_none().px(4).rounded(3).text_size(10).bg(t.selected)
+          .text_color(ref.startsWith("origin/") ? t.dim : CHANGE_COLORS.added).child(ref)))
+        .child(div().flex_1().min_w(0).truncate().when(entry.head, (el) => el.font_semibold()).child(entry.subject));
+    });
+    return v_flex().flex_1().min_h(0).relative().py(4)
+      .child(v_virtual_list("code-graph", graph.length, GRAPH_ROW, keyOf, render).size_full()
+        .on_item_click((key) => {
+          if (!key.startsWith("line-")) this.showCommit(key);
+        }))
+      .child(Scrollbar.vertical("code-graph").absolute().inset_0());
+  }
+
+  commitItems(commit) {
+    const items = [];
+    const rest = commit.message.split("\n").slice(1).join("\n").trim();
+    if (rest) items.push({ kind: "message", text: rest, height: rest.split("\n").length * 17 + 16 });
+    let shown = 0;
+    commit.files.forEach((file, index) => {
+      items.push({ kind: "file", file, index, height: 28 });
+      if (file.collapsed || file.too_large || shown >= COMMIT_ROWS) {
+        items.push({ kind: "note", text: file.collapsed ? "Binary file" : "Too large to show", height: 22 });
+        return;
+      }
+      for (const row of file.rows) items.push({ kind: "row", row, height: DIFF_ROW });
+      shown += file.rows.length;
+    });
+    if (!commit.files.length) items.push({ kind: "note", text: "No file changes", height: 30 });
+    return items;
+  }
+
+  commitItem(t, item) {
+    if (item.kind === "message") return div().px(12).py(8).text_size(12).text_color(t.dim).child(item.text);
+    if (item.kind === "note") return div().h(item.height).px(12).flex().items_center().text_size(11.5).text_color(t.dim).child(item.text);
+    if (item.kind === "file") {
+      const { file } = item;
+      const added = file.rows.filter((row) => row.kind === "add").length;
+      const removed = file.rows.filter((row) => row.kind === "del").length;
+      return h_flex().h(28).px(12).gap(8).items_center().border_y(1).border_color(t.border).bg(t.hover)
+        .font_family(MONO).text_size(12).cursor_pointer()
+        .child(iconElement(fileIcon(file.new_path), t.dim))
+        .child(div().flex_1().min_w(0).truncate().child(file.renamed_file ? `${file.old_path} → ${file.new_path}` : file.new_path))
+        .child(div().flex_none().text_size(10.5).text_color("#16a34a").child(added ? `+${added}` : ""))
+        .child(div().flex_none().text_size(10.5).text_color("#dc2626").child(removed ? `−${removed}` : ""));
+    }
+    const { row } = item;
+    const kind = row.kind;
+    const number = (value) => div().flex_none().text_color(t.dim).child(kind === "hunk" ? "     " : String(value ?? "").padStart(5));
+    return h_flex().h(DIFF_ROW).px(12).gap(10).min_w(0).items_center().font_family(MONO).text_size(12)
+      .when(kind === "add", (el) => el.bg(DIFF_ADDED))
+      .when(kind === "del", (el) => el.bg(DIFF_DELETED))
+      .when(kind === "hunk", (el) => el.text_color(t.dim))
+      .child(number(row.old))
+      .child(number(row.new))
+      .child(div().flex_none().text_color(kind === "add" ? CHANGE_COLORS.added : kind === "del" ? CHANGE_COLORS.deleted : t.dim)
+        .child(kind === "add" ? "+" : kind === "del" ? "−" : " "))
+      .child(div().min_w(0).truncate().child(row.text.replace(/\t/g, "  ") || " "));
+  }
+
+  commitPanel(t) {
+    const commit = this.commit;
+    const header = h_flex().h(34).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().flex_none().font_family(MONO).text_size(12).text_color(t.dim).child(commit.sha.slice(0, 10)))
+      .child(div().flex_1().min_w(0).truncate().text_size(12.5).font_semibold().child(commit.loading ? "Loading…" : commit.message.split("\n")[0]))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(commit.loading ? "" : `${commit.author} · ${commit.when}`))
+      .child(div().id("close-commit").flex_none().w(20).h(20).flex().items_center().justify_center().rounded(4).text_size(12).text_color(t.dim)
+        .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click(() => this.closeCommit())
+        .child("×"));
+    if (commit.loading) return v_flex().flex_1().min_w(0).min_h(0).child(header);
+    commit.items ??= this.commitItems(commit);
+    const items = commit.items;
+    return v_flex().flex_1().min_w(0).min_h(0)
+      .child(header)
+      .child(v_flex().flex_1().min_h(0).relative()
+        .child(v_virtual_list(`commit-${commit.sha}`, items.length, items.map((item) => item.height), (index) => String(index),
+          (range) => items.slice(range.start, range.end).map((item) => this.commitItem(t, item))).size_full()
+          .on_item_click((key) => {
+            const item = items[Number(key)];
+            if (item?.kind === "file") this.open(item.file.new_path, null);
+          }))
+        .child(Scrollbar.vertical(`commit-${commit.sha}`).absolute().inset_0()));
+  }
+
   changesView(t, currentPath) {
-    const changes = this.changes;
+    const changes = this.shownChanges();
     const section = (label) => div().px(12).pt(10).pb(4).text_size(11).font_semibold().text_color(t.dim).child(label);
     const rows = [];
     if (!changes) rows.push(div().px(12).py(8).text_size(12).text_color(t.dim).child(this.changesLoading ? "Reading the branch…" : "No changes"));
     else {
+      rows.push(h_flex().mx(8).mt(8).p(2).gap(2).rounded(6).border_1().border_color(t.border)
+        .child(this.scopeButton(t, "uncommitted", "Uncommitted", this.working?.files.length ?? 0))
+        .child(this.scopeButton(t, "all", "All", this.changes?.files.length ?? 0)));
       rows.push(div().px(12).pt(8).text_size(11.5).text_color(t.dim).font_family(MONO).truncate().child(`${changes.branch} → ${changes.base}`));
       rows.push(section(`FILES · ${changes.files.length}`));
       changes.files.forEach((file, index) => {
@@ -1859,6 +2515,7 @@ export default class Code extends View {
   }
 
   editorPane(t) {
+    if (this.commit) return this.commitPanel(t);
     if (!this.current) {
       return v_flex().flex_1().min_w(0).items_center().justify_center().text_color(t.dim)
         .child(this.root ? `Pick a file, or ${this.hint("files")}` : "Loading…");
@@ -1876,9 +2533,11 @@ export default class Code extends View {
         .when(this.forward.length > 0, (el) => el.child(div().child(`${this.hint("forward")} forward`))))
       .when(this.findOpen, (el) => el.child(this.findBar(t)))
       .when(Boolean(this.composer), (el) => el.child(h_flex().flex_none().px(12).py(6).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().flex_none().font_family(MONO).text_size(11).text_color(COMMENT_COLOR).child(where(this.composer)))
+        .child(div().flex_none().font_family(MONO).text_size(11).text_color(COMMENT_COLOR)
+          .child(this.composer?.reply ? `reply to @${this.composer.reply.notes[0]?.author} · ${where(this.composer)}` : where(this.composer)))
         .child(Input.new(this.commentInput).flex_1().h(28).text_size(12.5))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child("⏎ add · Esc cancel"))))
+        .when(Boolean(this.composer?.error), (el) => el.child(div().flex_shrink_1().min_w(0).max_w(420).truncate().text_size(11).text_color(CHANGE_COLORS.deleted).child(`not posted: ${this.composer.error}`)))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(this.composer?.reply ? `⏎ post on ${this.review?.name ?? "the MR"} · Esc cancel` : "⏎ add · Esc cancel"))))
       .when(Boolean(this.peek) && !this.diffVisible(document), (el) => el.child(this.peekPanel(t)))
       .child(div().flex().flex_col().flex_1().min_h(0).min_w(0)
         .on_mouse_up("right", () => this.cx.timer.after(0, () => this.findReferences()))
@@ -1927,6 +2586,10 @@ export default class Code extends View {
     const servers = Object.entries(this.serverStatus).map(([name, status]) => `${name}: ${status}`).join(" · ");
     return h_flex().h(26).flex_none().px(12).gap(14).items_center().border_t(1).border_color(t.border).text_size(11.5).text_color(t.dim)
       .child(div().child(`${counts[0]} errors · ${counts[1]} warnings`))
+      .when(Boolean(this.changes?.branch), (el) => el.child(div().id("branch").flex_none().max_w(260).truncate().px(6).rounded(4).cursor_pointer()
+        .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { cx.write_to_clipboard(this.changes.branch); this.message = `Copied ${this.changes.branch}`; this.redraw(); })
+        .child(this.changes.branch === "HEAD" ? "⎇ detached HEAD" : `⎇ ${this.changes.branch}`)))
       .child(div().min_w(0).truncate().child(servers || "no language server"))
       .child(div().flex_1())
       .child(div().min_w(0).truncate().child(this.message))

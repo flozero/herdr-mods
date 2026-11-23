@@ -1,7 +1,7 @@
-import { exec, home } from "herdr";
-import * as fs from "fs/promises";
+import { exec, home, writeTextFile } from "herdr";
 import { position } from "./diff.js";
 import { where } from "./review.js";
+import { parsePages } from "./pages.js";
 
 const BODIES = () => `${home()}/.cache/herdr-code/bodies`;
 
@@ -14,7 +14,7 @@ async function run(command, args, cwd) {
 async function withBody(body, use) {
   await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", BODIES()]);
   const file = `${BODIES()}/body-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
-  await fs.writeFile(file, JSON.stringify(body));
+  await writeTextFile(file, JSON.stringify(body));
   try {
     return await use(file);
   } finally {
@@ -84,3 +84,26 @@ export async function publishReview(root, review, comments, files) {
   }
   return { inline: inline.length, general: placed.length - inline.length };
 }
+
+export async function reviewThreads(root, review) {
+  if (review?.kind !== "gitlab") return [];
+  const out = await run("glab", ["api", "--paginate", `projects/:id/merge_requests/${review.number}/discussions?per_page=100`], root);
+  return parsePages(out.trim() || "[]").flatMap((discussion) => {
+    const notes = discussion.notes.filter((note) => !note.system);
+    const position = notes[0]?.position;
+    if (!notes.length || !position?.new_line || !position.new_path) return [];
+    return [{
+      id: discussion.id,
+      path: position.new_path,
+      line: position.new_line,
+      resolved: Boolean(notes[0].resolvable) && notes.every((note) => !note.resolvable || note.resolved),
+      notes: notes.map((note) => ({ id: note.id, author: note.author?.username ?? "?", body: note.body ?? "" })),
+    }];
+  });
+}
+
+export const replyThread = (root, review, discussionId, body) =>
+  run("glab", ["api", "-X", "POST", `projects/:id/merge_requests/${review.number}/discussions/${discussionId}/notes`, "-f", `body=${body}`], root);
+
+export const resolveThread = (root, review, discussionId, resolved) =>
+  run("glab", ["api", "-X", "PUT", `projects/:id/merge_requests/${review.number}/discussions/${discussionId}`, "-F", `resolved=${resolved}`], root);
