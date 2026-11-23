@@ -43,8 +43,8 @@ const DENY = [
   "Bash(git reset:*)", "Bash(git stash:*)", "Bash(git rebase:*)", "Bash(git merge:*)",
 ];
 const TABS = ["description", "changes", "comments", "review"];
-const LIST_TABS = ["mine", "review", "ignored", "merged"];
-const LIST_LABEL = { mine: "Mine", review: "To review", ignored: "Ignored", merged: "Merged" };
+const LIST_TABS = ["mine", "review", "ignored", "merged", "person"];
+const LIST_LABEL = { mine: "Mine", review: "To review", ignored: "Ignored", merged: "Merged", person: "Someone" };
 const cacheDir = () => `${appHome()}/mods/gitlab-review/.cache`;
 const ignoredFile = () => `${cacheDir()}/ignored.json`;
 const seenFile = () => `${cacheDir()}/seen.json`;
@@ -134,6 +134,8 @@ export default class GitlabReview extends View {
     this.user = null;
     this.mrs = [];
     this.authored = [];
+    this.person = null;
+    this.personMrs = null;
     this.stackParents = {};
     this.health = {};
     this.sel = 0;
@@ -184,7 +186,7 @@ export default class GitlabReview extends View {
     this.search.on("blur", (_e, cx) => { this.searchFocused = false; cx.notify(); });
     this.peopleInput = InputState.new({ placeholder: "Search people" });
     this.peopleInput.on("change", (_e, cx) => this.searchPeople(cx));
-    this.peopleInput.on("submit", (_e, cx) => { const list = this.peopleChoices(); const u = list[Math.min(this.peoplePick?.sel ?? 0, list.length - 1)]; if (u) this.togglePerson(this.peoplePick.kind, u, cx); });
+    this.peopleInput.on("submit", (_e, cx) => { const list = this.peopleChoices(); const u = list[Math.min(this.peoplePick?.sel ?? 0, list.length - 1)]; if (u) this.choosePerson(this.peoplePick.kind, u, cx); });
     this.peopleInput.on("focus", (_e, cx) => { this.peopleFocused = true; cx.notify(); });
     this.peopleInput.on("blur", (_e, cx) => { this.peopleFocused = false; cx.notify(); });
     this.peoplePick = null;
@@ -252,6 +254,7 @@ export default class GitlabReview extends View {
     if (this.listTab === "mine") return this.authored.filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, own: true }));
     if (this.listTab === "ignored") return shown.filter((m) => this.ignored[m.iid]).map((m) => ({ m, ignored: true }));
     if (this.listTab === "merged") return (this.merged ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, merged: true }));
+    if (this.listTab === "person") return (this.personMrs ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false }));
     const live = shown.filter((m) => !this.ignored[m.iid]);
     return [
       ...live.filter((m) => this.replied[m.iid]).map((m) => ({ m, ignored: false, replied: true })),
@@ -269,6 +272,34 @@ export default class GitlabReview extends View {
     cx.notify();
   }
 
+  async loadPerson(cx) {
+    const who = this.person?.username;
+    if (!who || this.loading.has("person")) return;
+    const mrs = await this.call(cx, "person", () => gl.authored(this.top, who));
+    if (!mrs || this.person?.username !== who) return;
+    this.personMrs = mrs;
+    await this.loadParents(cx, mrs);
+    cx.notify();
+  }
+
+  pickAuthor(u, cx) {
+    this.closePeople(cx);
+    if (this.person?.username !== u.username) {
+      this.person = { username: u.username, name: u.name };
+      this.personMrs = null;
+      this.sel = 0;
+      this.anchor = null;
+      cx.spawn(async (cx) => this.loadPerson(cx));
+    }
+    if (this.listTab !== "person") this.setListTab("person", cx);
+    else this.savePrefs(cx);
+  }
+
+  choosePerson(kind, u, cx) {
+    if (kind === "author") this.pickAuthor(u, cx);
+    else this.togglePerson(kind, u, cx);
+  }
+
   toggleMerged(cx) {
     this.setListTab(this.listTab === "merged" ? "review" : "merged", cx);
   }
@@ -282,6 +313,8 @@ export default class GitlabReview extends View {
     this.editor = saved.app ?? null;
     this.split = Boolean(prefs.split);
     if (LIST_TABS.includes(prefs.listTab)) this.listTab = prefs.listTab;
+    if (prefs.person?.username) this.person = prefs.person;
+    if (this.listTab === "person" && this.user && this.person && this.personMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
     cx.notify();
   }
 
@@ -292,7 +325,7 @@ export default class GitlabReview extends View {
   }
 
   savePrefs(cx) {
-    const prefs = { split: this.split, listTab: this.listTab };
+    const prefs = { split: this.split, listTab: this.listTab, person: this.person };
     cx.spawn(async (cx) => {
       try {
         await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", cacheDir()]);
@@ -307,6 +340,10 @@ export default class GitlabReview extends View {
     this.sel = 0;
     this.anchor = null;
     if (tab === "merged" && this.merged === null && this.user) cx.spawn(async (cx) => this.loadMerged(cx));
+    if (tab === "person" && this.user) {
+      if (!this.person) this.openPeople("author", cx);
+      else if (this.personMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
+    }
     this.savePrefs(cx);
     cx.notify();
   }
@@ -319,6 +356,7 @@ export default class GitlabReview extends View {
       review: shown.filter((m) => !this.ignored[m.iid]).length,
       ignored: shown.filter((m) => this.ignored[m.iid]).length,
       merged: this.merged ? this.merged.filter((m) => !q || this.matches(m, q)).length : null,
+      person: this.personMrs ? this.personMrs.filter((m) => !q || this.matches(m, q)).length : null,
     };
   }
 
@@ -327,7 +365,9 @@ export default class GitlabReview extends View {
     return h_flex().h(36).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
       .children(LIST_TABS.map((tab, n) => {
         const on = this.listTab === tab;
-        const count = tab === "merged" && counts.merged === null ? (this.loading.has("merged") ? "…" : "last 30") : String(counts[tab]);
+        const count = tab === "merged" && counts.merged === null ? (this.loading.has("merged") ? "…" : "last 30")
+          : tab === "person" ? (this.person ? `@${this.person.username}${counts.person === null ? "" : ` · ${counts.person}`}` : "pick")
+          : String(counts[tab]);
         return h_flex().id(`lt-${tab}`).h(24).px(10).gap(6).items_center().rounded(12).border_1().text_size(12).cursor_pointer()
           .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
           .on_mouse_down("left", stop).on_click((_e, cx) => this.setListTab(tab, cx))
@@ -960,6 +1000,7 @@ export default class GitlabReview extends View {
       await this.findReplies(cx, mrs);
     }
     if (this.merged !== null) await this.loadMerged(cx);
+    if (this.personMrs !== null) await this.loadPerson(cx);
     if (this.iid) await this.loadMr(cx, this.iid);
   }
 
@@ -1570,7 +1611,9 @@ export default class GitlabReview extends View {
   }
 
   peopleChoices() {
-    const p = this.peoplePick, s = this.details[this.iid]?.side;
+    const p = this.peoplePick;
+    if (p?.kind === "author") return this.authorChoices(p);
+    const s = this.details[this.iid]?.side;
     if (!p || !s) return [];
     const on = new Set(s[p.kind].map((u) => u.username));
     const q = this.peopleInput.value().trim().toLowerCase();
@@ -1580,6 +1623,17 @@ export default class GitlabReview extends View {
     return pool.filter((u) => u?.username && !seen.has(u.username) && seen.add(u.username))
       .filter((u) => !q || `${u.username} ${u.name ?? ""}`.toLowerCase().includes(q))
       .map((u) => ({ username: u.username, name: u.name ?? u.username, on: on.has(u.username) }))
+      .slice(0, 12);
+  }
+
+  authorChoices(p) {
+    const q = this.peopleInput.value().trim().toLowerCase();
+    const near = [...(this.person ? [this.person] : []), ...[...this.mrs, ...this.authored, ...(this.merged ?? [])].flatMap((m) => [m.author, ...(m.reviewers ?? [])])];
+    const pool = q && p.found ? [...p.found, ...near] : near;
+    const seen = new Set([this.user?.username]);
+    return pool.filter((u) => u?.username && !seen.has(u.username) && seen.add(u.username))
+      .filter((u) => !q || `${u.username} ${u.name ?? ""}`.toLowerCase().includes(q))
+      .map((u) => ({ username: u.username, name: u.name ?? u.username, on: u.username === this.person?.username }))
       .slice(0, 12);
   }
 
@@ -1649,13 +1703,13 @@ export default class GitlabReview extends View {
         .on_mouse_down("left", stop).child(Input.new(this.peopleInput).flex_1().h_full().text_size(12)))
       .children(list.map((u, n) => h_flex().id(`pp-${u.username}`).w_full().h(26).px(6).gap(8).items_center().rounded(6).cursor_pointer()
         .bg(n === sel ? t.selected : t.popover).hover((s) => s.bg(n === sel ? t.selected : t.hover))
-        .on_mouse_down("left", stop).on_click((_e, cx) => this.togglePerson(p.kind, u, cx))
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.choosePerson(p.kind, u, cx))
         .child(div().w(12).flex_none().text_size(11).text_color(t.accent).child(this.peopleBusy === u.username ? "…" : u.on ? "✓" : ""))
         .child(this.avatar(t, u.name, 18))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(u.username === this.user?.username ? t.accent : t.foreground).child(u.name))
         .child(div().flex_none().max_w(90).truncate().text_size(10.5).text_color(t.dim).child(`@${u.username}`))))
       .when(!list.length, (el) => el.child(div().px(6).py(4).text_size(11.5).text_color(t.dim).child(q.length < 2 ? "Type a name" : "Nobody matches")))
-      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child("↑↓ choose · Enter add or remove · Esc close"));
+      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child(p.kind === "author" ? "↑↓ choose · Enter show their open merge requests · Esc close" : "↑↓ choose · Enter add or remove · Esc close"));
   }
 
   draftButton(t) {
@@ -1928,6 +1982,8 @@ export default class GitlabReview extends View {
       i: () => this.ignorePicked(cx),
       m: () => this.toggleMerged(cx),
       1: () => this.setListTab("mine", cx), 2: () => this.setListTab("review", cx), 3: () => this.setListTab("ignored", cx), 4: () => this.setListTab("merged", cx),
+      5: () => this.setListTab("person", cx),
+      p: () => this.openPeople("author", cx),
       tab: () => this.setListTab(LIST_TABS[(LIST_TABS.indexOf(this.listTab) + 1) % LIST_TABS.length], cx),
       "shift-tab": () => this.setListTab(LIST_TABS[(LIST_TABS.indexOf(this.listTab) + LIST_TABS.length - 1) % LIST_TABS.length], cx),
       r: () => this.reload(cx),
@@ -2311,7 +2367,7 @@ export default class GitlabReview extends View {
       : this.searchFocused ? "Type to filter what's loaded · Enter keep · Esc clear"
       : this.iid ? `/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask ${this.agentName()} · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back`
       : this.picked().length > 1 ? `${this.picked().length} selected · i ignore or restore them all · Esc unselect`
-      : "1–4 / Tab ⇧Tab lists · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
+      : "1–5 / Tab ⇧Tab lists · p pick someone · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
       .child(div().flex_1().min_w(0).truncate().text_color(color).child(s?.text ?? hint))
@@ -2349,6 +2405,7 @@ export default class GitlabReview extends View {
     const items = [];
     const replied = this.listTab === "review" ? rows.filter((x) => x.replied).length : 0;
     if (replied) items.push(section("sec-replied", "REPLIED TO YOU", replied));
+    if (this.listTab === "person") items.push(this.personBar(t));
     rows.forEach((x, n) => {
       if (replied && n === replied) items.push(section("sec-others", "THE OTHERS", rows.length - replied));
       items.push(this.mrRow(t, x, n));
@@ -2357,9 +2414,21 @@ export default class GitlabReview extends View {
       : this.listTab === "mine" ? "You have no open merge request here"
       : this.listTab === "ignored" ? "Nothing ignored: i on a merge request puts it here"
       : this.listTab === "merged" ? (this.merged === null || this.loading.has("merged") ? "Loading…" : "No merged merge request you reviewed")
+      : this.listTab === "person" ? (!this.person ? "Pick someone to see their open merge requests" : this.personMrs === null ? "Loading…" : `${this.person.name} has no open merge request here`)
       : this.mrs.length ? "Nothing left: everything else is ignored" : "No open merge request waits on your review here";
     if (!rows.length) items.push(div().px(16).py(10).text_size(12).text_color(t.dim).child(empty));
     return v_flex().id("glr-list").flex_1().min_h(0).pt(4).pb(80).overflow_y_scrollbar().children(items);
+  }
+
+  personBar(t) {
+    const picking = this.peoplePick?.kind === "author";
+    return v_flex().id("person-bar").px(12).pt(6).pb(4).gap(6)
+      .child(h_flex().gap(8).items_center()
+        .when(Boolean(this.person), (el) => el.child(this.avatar(t, this.person.name, 20))
+          .child(div().text_size(12.5).text_color(t.foreground).child(this.person.name))
+          .child(div().text_size(11).text_color(t.dim).child(`@${this.person.username}`)))
+        .child(this.button(t, "person-pick", picking ? "Close  Esc" : this.person ? "Someone else  P" : "Pick someone  P", (cx) => this.openPeople("author", cx))))
+      .when(picking, (el) => el.child(this.peoplePicker(t)));
   }
 
   mrRow(t, { m, ignored, merged, replied, own }, n) {

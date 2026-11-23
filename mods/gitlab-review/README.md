@@ -4,7 +4,7 @@
 
 ## What it does
 
-Review GitLab merge requests in a Herdr window: your merge requests and the ones to review, the description, the diff (split or unified), threads, draft comments, approvals, and the team review rules that apply to the changed files.
+Review GitLab merge requests in a Herdr window: your merge requests, the ones to review and the open ones of someone you pick (`5`, `p`), the description, the diff (split or unified), threads, draft comments, approvals, and the team review rules that apply to the changed files.
 
 - **Ask the agent** (`g`, `⌥↵` in the comment box) opens a read-only agent on the right that knows the merge request and answers your questions. Nothing is posted.
 - **Local review**: on a branch without a merge request (or opened with `local`), comments on the code go to an agent working in the checkout (`a`), which changes the code.
