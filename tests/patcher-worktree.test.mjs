@@ -10,7 +10,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const app = process.env.HERDR_APP_HOME ?? join(homedir(), ".config/herdr-app");
 const patcherSource = readFileSync(join(here, "../mods/patcher/main.js"), "utf8");
 const PATCHES = JSON.parse(patcherSource.match(/const PATCHES = (\[[^\]]*\]);/)[1]);
-const ORIGINALS = ["mods/worktree", "mods/menu", "mods/new-menu", "mods/spaces", "mods/tabs", "layouts/main.json"];
+const ORIGINALS = ["mods/worktree", "mods/menu", "mods/new-menu", "mods/spaces", "mods/tabs", "mods/workspace-status", "layouts/main.json"];
 const haveHerdr = ORIGINALS.every((p) => existsSync(join(app, p)));
 
 function patched() {
@@ -249,4 +249,27 @@ test("New space starts where the focused terminal is, in every menu", { skip }, 
   }
   const items = new Function(...Object.keys(globals), `${sourceOf("menu")}; return items;`)(...Object.values(globals));
   assert.deepEqual(items({}).find(([label]) => label === "New space")[2], want);
+});
+
+test("statusbar: issue ids from the branch, publishing only on change, merge request mapping", { skip }, () => {
+  const source = readFileSync(join(built, "mods/workspace-status/context.js"), "utf8").replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+  const { issueCandidates, shouldPublish, merged, mrOf } = new Function("exec", "appHome", "shared", "setShared", `${source}; return { issueCandidates, shouldPublish, merged, mrOf };`)();
+  assert.deepEqual(issueCandidates("florentg/pla-663-dev-data-ids"), ["PLA-663"]);
+  assert.deepEqual(issueCandidates("main"), []);
+  assert.deepEqual(issueCandidates("eng-12-and-ops-3"), ["ENG-12", "OPS-3"]);
+  const entry = { branch: "b", fetchedAt: 1000, mr: null, issue: null, gitlab: null };
+  assert.equal(shouldPublish(null, entry, 1000), true);
+  assert.equal(shouldPublish(entry, { ...entry, fetchedAt: 5000 }, 5000), false);
+  assert.equal(shouldPublish(entry, { ...entry, fetchedAt: 70000 }, 70000), true);
+  assert.equal(shouldPublish(entry, { ...entry, issue: { id: "X-1" }, fetchedAt: 2000 }, 2000), true);
+  const day = 24 * 60 * 60 * 1000;
+  assert.deepEqual(Object.keys(merged({ old: { fetchedAt: 0 }, kept: { fetchedAt: day } }, "/r", entry, day + 10)), ["kept", "/r"]);
+  const mr = mrOf({ iid: "58284", title: "t", webUrl: "u", draft: true, sourceBranch: "s", targetBranch: "m", diffHeadSha: "h",
+    headPipeline: { status: "RUNNING", path: "/g/p/-/pipelines/1" }, resolvableDiscussionsCount: 3, resolvedDiscussionsCount: 1,
+    diffRefs: { baseSha: "b", headSha: "h", startSha: "s" } }, "gitlab.com");
+  assert.equal(mr.iid, 58284);
+  assert.equal(mr.openThreads, 2);
+  assert.deepEqual(mr.pipeline, { status: "running", web_url: "https://gitlab.com/g/p/-/pipelines/1" });
+  assert.deepEqual(mr.diff_refs, { base_sha: "b", head_sha: "h", start_sha: "s" });
+  assert.equal(mrOf(null, "gitlab.com"), null);
 });
