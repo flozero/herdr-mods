@@ -28,7 +28,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 
 | Key | |
 | --- | --- |
-| `ctrl-p` | find a file |
+| `ctrl-p` | find a file (`↓` `↑` move in the results, `⏎` opens the highlighted one; the keyboard stays in the field, so the search can still be edited) |
 | `cmd-shift-f`, `ctrl-shift-f` | find and replace in the project (Search) |
 | `cmd-f`, `ctrl-f` | find in the file (`⏎` next, `⇧⏎` previous, `Esc` close) |
 | `ctrl-b` | show or hide the sidebar |
@@ -39,6 +39,10 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl-shift-enter` | publish the review on the merge request |
 | `ctrl-s` | save |
 | `ctrl-w`, middle click on a tab | close the tab (a tab with unsaved changes asks for a second one) |
+| `ctrl-d` | delete the line (every line the selection touches) |
+| `ctrl-x` | with nothing selected, cut the line (to the clipboard); with a selection it cuts that, as usual |
+| `alt-up`, `alt-down` | move the line, or the selected lines, up or down |
+| `ctrl-shift-d` | duplicate the line, or the selected lines, below |
 | `f12`, `cmd-click` | go to definition |
 | `shift-f12`, right click, `ctrl-click` (macOS), `ctrl-cmd-click` (ctrl + Super + click on Linux, where Super alone moves the window on Omarchy and `ctrl-click` is go to definition) | show where it is used (click a line to go there, `Esc` closes) |
 | `ctrl--` | go back to the previous file or place |
@@ -51,6 +55,8 @@ Select lines and comment them; send the comments to the agent working in the rep
 
 `keys` in the config changes them.
 
+The line keys work in the editor only: with the keyboard in another field (the finder, a search, a comment) they go to that field. In a changed file's diff they leave the deleted lines and the comments alone: a line can't be deleted or moved across one (`Deleted lines and comments can't be edited`). Each is one undo step.
+
 ## Config
 
 `mods/code/config.json` (made from `config.example.json` on install, kept on update):
@@ -59,7 +65,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 | --- | --- | --- |
 | `agent` | `["claude"]` | the agent the review starts when none works in the repository |
 | `agentName` | `"Claude"` | the name shown on messages |
-| `keys` | `{}` | `{ "<id>": "<key>" }`, the ids above (`files`, `search`, `find`, `sidebar`, `changes`, `preview`, `comment`, `send`, `publish`, `save`, `close`, `definition`, `references`, `back`, `forward`, `nextTab`, `previousTab`, `shortcuts`) |
+| `keys` | `{}` | `{ "<id>": "<key>" }`, the ids above (`files`, `search`, `find`, `sidebar`, `changes`, `preview`, `comment`, `send`, `publish`, `save`, `close`, `definition`, `references`, `back`, `forward`, `nextTab`, `previousTab`, `deleteLine`, `cutLine`, `moveLineUp`, `moveLineDown`, `duplicateLine`, `shortcuts`) |
 | `servers` | `{}` | language server commands, over the built-in ones, by name: `python`, `rust`, `go`, `opentofu`, `typescript`, `vue`, `bash`, `dockerfile`, `compose`, `postgres` |
 
 ## Requirements

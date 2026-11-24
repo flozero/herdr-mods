@@ -4,6 +4,7 @@ import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile
 import { launch, fileUri, uriPath } from "./lsp.js";
 import { dockerLanguage } from "./docker.js";
 import { plainCompletion } from "./snippet.js";
+import { deleteLines, cutLines, moveLines, duplicateLines } from "./lines.js";
 import { branchDiff, workingDiff, commitGraph, commitDiff, agentLabel } from "./review/local.js";
 import { lineDiff } from "./review/diff.js";
 import { findReview, publishReview, reviewThreads, replyThread, resolveThread } from "./review/forge.js";
@@ -41,6 +42,12 @@ const ACTIONS = [
   { id: "publish", key: "ctrl-shift-enter", label: "Publish the review on the MR/PR", run: (view) => view.publish() },
   { id: "save", key: "ctrl-s", label: "Save", run: (view) => view.save() },
   { id: "close", key: "ctrl-w", label: "Close the tab", run: (view) => view.current && view.closeTab(view.current.path) },
+  // Line edits, in the editor only. They answer false when the key is not theirs (the keyboard is in another field, or a cut has a selection).
+  { id: "deleteLine", key: "ctrl-d", label: "Delete the line", run: (view, cx) => view.editLines(deleteLines, cx) },
+  { id: "cutLine", key: "ctrl-x", aliases: ["cmd-x"], label: "Cut the line (when nothing is selected)", run: (view, cx) => view.editLines(cutLines, cx) },
+  { id: "moveLineUp", key: "alt-up", label: "Move the line up", run: (view, cx) => view.editLines(moveLines(-1), cx) },
+  { id: "moveLineDown", key: "alt-down", label: "Move the line down", run: (view, cx) => view.editLines(moveLines(1), cx) },
+  { id: "duplicateLine", key: "ctrl-shift-d", label: "Duplicate the line", run: (view, cx) => view.editLines(duplicateLines, cx) },
   { id: "definition", key: "f12", label: "Go to definition", run: (view) => view.goToDefinition() },
   { id: "find", key: "cmd-f", aliases: ["ctrl-f"], label: "Find in the file", run: (view) => view.startFind() },
   { id: "references", key: "shift-f12", label: "Show where it is used", run: (view) => view.findReferences() },
@@ -56,7 +63,7 @@ const ACTIONS = [
   { id: "shortcuts", key: "ctrl-/", label: "Show the shortcuts", run: (view) => view.toggleShortcuts() },
 ];
 
-const FIXED_SHORTCUTS = [["cmd-click", "Go to definition"], ["ctrl-click, right click", "Show where it is used"], ["ctrl-cmd-click", "Show where it is used"], ["middle-click", "Close a tab (click it)"], ["escape", "Back to the editor, or cancel"]];
+const FIXED_SHORTCUTS = [["cmd-click", "Go to definition"], ["ctrl-click, right click", "Show where it is used"], ["ctrl-cmd-click", "Show where it is used"], ["middle-click", "Close a tab (click it)"], ["down", "File finder: next file (⏎ opens it)"], ["up", "File finder: previous file"], ["escape", "Back to the editor, or cancel"]];
 
 const KEY_SYMBOLS = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", enter: "⏎", escape: "Esc", left: "←", right: "→", up: "↑", down: "↓", tab: "⇥", click: " click", middle: "Middle" };
 
@@ -507,15 +514,21 @@ export default class Code extends View {
     this.config = {};
     this.keymap = keymapOf({});
     this.shortcutsShown = false;
+    this.typing = null;
+    this.finderAt = 0;
+    this.finderQuery = "";
+    this.finderFocus = false;
     this.finder = InputState.new({ placeholder: "Find a file" });
     this.finder.on("change", () => {
       this.refreshSearch();
       this.redraw();
     });
     this.finder.on("submit", () => {
-      const [first] = this.search.results;
-      if (first !== undefined) this.open(this.files[first], null);
+      const index = this.search.results[this.finderAt];
+      if (index !== undefined) this.open(this.files[index], null);
     });
+    this.finder.on("focus", () => { this.finderFocus = true; });
+    this.finder.on("blur", () => { this.finderFocus = false; });
     cx.spawn(async (cx) => {
       try {
         this.config = JSON.parse((await readTextFile(`${MOD_DIR()}/config.json`)) ?? "{}");
@@ -1059,6 +1072,7 @@ export default class Code extends View {
       const state = EditorState.new({ language: document.language?.syntax ?? extensionOf(document.path), value, font_family: MONO, folding: false });
       document.diff = { state, value, deleted: out.filter(isVirtual) };
       state.on("change", () => this.syncFromDiff(document));
+      this.trackTyping(document, state);
       this.applyDiffLsp(document);
     } else if (document.diff.state.value() !== value) {
       const range = this.realRange(document);
@@ -1520,6 +1534,11 @@ export default class Code extends View {
   refreshSearch() {
     const query = this.finder.value().trim().toLowerCase();
     const previous = this.search;
+    // The highlighted result starts again at the top with a new query, and stays where it is when only the list of files changes.
+    if (query !== this.finderQuery) {
+      this.finderQuery = query;
+      this.finderAt = 0;
+    }
     if (!query) {
       this.search = { query, candidates: [], results: [] };
       return;
@@ -1536,6 +1555,15 @@ export default class Code extends View {
       candidates: scored.map(({ index }) => index),
       results: scored.slice(0, SHOWN_FILES).map(({ index }) => index),
     };
+    this.finderAt = Math.min(this.finderAt, Math.max(this.search.results.length - 1, 0));
+  }
+
+  // ↑ and ↓ in the file finder: the keyboard stays in the field, so the query can still be edited.
+  moveFinder(step) {
+    const count = this.search.results.length;
+    this.finderAt = (this.finderAt + step + count) % count;
+    this.treeScroll.scroll_to_item(this.finderAt);
+    this.redraw();
   }
 
   treeRows(node = this.tree, depth = 0, rows = []) {
@@ -1633,6 +1661,7 @@ export default class Code extends View {
         this.focusActive(this.current);
       }
     }
+    if (this.typing?.document === document) this.typing = null;
     document.state.release();
     this.message = "";
     this.redraw();
@@ -2113,6 +2142,7 @@ export default class Code extends View {
     const language = languageOf(path, text);
     const state = EditorState.new({ language: language?.syntax ?? extension, value: text, font_family: MONO });
     const document = { path, uri: fileUri(path), state, saved: text, dirty: false, version: 1, diagnostics: [], diagnosticsBy: new Map(), language, preview: false, previewLine: null };
+    this.trackTyping(document, state);
     state.on("change", () => {
       if (document.diff && !document.syncing) this.liveDiff(document);
       document.version += 1;
@@ -2330,10 +2360,38 @@ export default class Code extends View {
     this.redraw();
   }
 
+  // The editor (the file's, or its diff) that has the keyboard, so a line edit never lands in another field.
+  trackTyping(document, state) {
+    state.on("focus", () => { this.typing = { document, state }; });
+    state.on("blur", () => { if (this.typing?.state === state) this.typing = null; });
+  }
+
+  // Delete, cut, move or duplicate the line (or lines) the cursor is on. False when the key is not for the editor to take.
+  editLines(operation, cx) {
+    const { document, state } = this.typing ?? {};
+    if (!document || this.documents.get(document.path) !== document) return false;
+    const text = state.value();
+    const edit = operation(text, state.selected_range());
+    if (edit === false) return false;
+    if (!edit) return true;
+    if (state === document.diff?.state && text.split("\n").slice(edit.first, edit.last + 1).some(isVirtual)) {
+      this.message = "Deleted lines and comments can't be edited";
+      this.redraw();
+      return true;
+    }
+    if (edit.copy !== undefined) cx.write_to_clipboard(edit.copy);
+    state.set_selected_range({ start: edit.from, end: edit.to });
+    state.replace(edit.text);
+    state.set_selected_range({ start: edit.start, end: edit.end });
+    return true;
+  }
+
   onKey(e, cx) {
     const key = e.keystroke;
     const action = this.keymap.get(key);
-    if (action) action.run(this);
+    if (action) {
+      if (action.run(this, cx) === false) return;
+    } else if ((key === "down" || key === "up") && this.finderFocus && this.search.results.length) this.moveFinder(key === "down" ? 1 : -1);
     else if (key === "shift-enter" && this.findOpen) this.findStep(-1);
     else if (key === "escape" && this.references) this.closeReferences();
     else if (key === "escape" && this.commit) this.closeCommit();
@@ -2400,7 +2458,7 @@ export default class Code extends View {
       .child(h_flex().h(40).flex_none().px(10).items_center().border_b(1).border_color(t.border)
         .child(Input.new(this.finder).flex_1().h(28).text_size(12.5)))
       .child(v_flex().id("code-files").flex_1().min_h(0).py(4).overflow_y_scrollbar().track_scroll(this.treeScroll)
-        .children(this.search.query ? this.searchRows(t, currentPath) : this.treeView(t, currentPath)))
+        .children(this.search.query ? this.searchRows(t) : this.treeView(t, currentPath)))
       .child(this.reviewPanel(t));
   }
 
@@ -2590,11 +2648,11 @@ export default class Code extends View {
       .on_mouse_down("left", stop);
   }
 
-  searchRows(t, currentPath) {
+  searchRows(t) {
     if (!this.search.results.length) return [div().px(12).py(6).text_size(12).text_color(t.dim).child("No file matches")];
-    return this.search.results.map((index) => {
+    return this.search.results.map((index, position) => {
       const path = this.files[index];
-      return this.row(t, `match-${index}`, 0, path === currentPath)
+      return this.row(t, `match-${index}`, 0, position === this.finderAt)
         .on_click(() => this.open(path, null))
         .child(iconElement(fileIcon(path), t.dim))
         .child(div().min_w(0).truncate().child(path));
