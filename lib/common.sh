@@ -134,9 +134,9 @@ install_group() {
       echo "  created mods/$m/config.json"
     fi
   done
-  keys="$here/keys/$group.json"
-  if [ "$(uname)" != Darwin ] && [ -f "$here/keys/$group.linux.json" ]; then keys="$here/keys/$group.linux.json"; fi
-  merge_keys "$keys"
+  if [ "$(uname)" = Darwin ]; then merge_keys "$here/keys/$group.json"; fi
+  if [ -f "$here/keys/$group.linux.json" ]; then merge_keys "$here/keys/$group.linux.json"
+  elif [ "$(uname)" != Darwin ]; then merge_keys "$here/keys/$group.json"; fi
   for s in $group_skills; do install_skill "$s"; done
   if command -v herdr-app >/dev/null 2>&1; then
     for m in $mods; do herdr-app check "$dest/mods/$m" | sed 's/^/  /'; done

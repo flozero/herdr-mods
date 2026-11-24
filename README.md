@@ -16,7 +16,7 @@ Then, once: `cmd-alt-p` (`ctrl-alt-p` on Linux) and click **Use the my-main layo
 
 ## Linux and Omarchy
 
-On Linux `cmd` is the Super key (the Windows key, or the Command key of an Apple keyboard): every `cmd-…` key of these mods works the same as on macOS, as long as nothing else has taken it. Each also has a Ctrl twin (the "Linux" keys below), bound next to it in `keys/<group>.linux.json`, for a desktop that keeps Super for itself.
+On Linux `cmd` is the Super key (the Windows key, or the Command key of an Apple keyboard): every `cmd-…` key of these mods works the same as on macOS, as long as nothing else has taken it. Each also has a Ctrl twin (the "Linux" keys below), bound next to it in `keys/<group>.linux.json`, for a desktop that keeps Super for itself; macOS gets the twins too, so the same fingers work on both.
 
 Omarchy (Hyprland) takes many Super chords before Herdr sees them. `./omarchy/install.sh` is an optional step that frees the ones Herdr and its mods use, in `~/.config/hypr/bindings.lua`, between two marker lines (the full list, with what each chord did, is in `omarchy/bindings.lua`). It keeps a backup next to the file, reloads Hyprland and puts the backup back if Hyprland reports an error; run it again to update the block, and `./omarchy/install.sh --remove` takes it out. `install-all.sh` doesn't run it: it changes your Omarchy shortcuts.
 
@@ -38,7 +38,7 @@ Herdr loads the mods from `~/.config/herdr-app/mods/`, not from this repository,
 
 ## How mods work
 
-A mod is a folder with a `mod.json` and a `main.js` that Herdr runs as a panel, a tab or a window. Each `install-<group>.sh` copies the group's mods into `~/.config/herdr-app/mods/`, adds its keys to `~/.config/herdr-app/keys.json` (`keys/<group>.json` on macOS, `keys/<group>.linux.json` on Linux; a key you already use is kept, it tells you which), and checks it with `herdr-app check`. Herdr reloads a mod as soon as its files change, and an update keeps each mod's `config.json`. The small `*-open` folders are launchers: a key can only open a mod, so they find or create the right tab, then close.
+A mod is a folder with a `mod.json` and a `main.js` that Herdr runs as a panel, a tab or a window. Each `install-<group>.sh` copies the group's mods into `~/.config/herdr-app/mods/`, adds its keys to `~/.config/herdr-app/keys.json` (`keys/<group>.linux.json`, and `keys/<group>.json` too on macOS; a key you already use is kept, it tells you which), and checks it with `herdr-app check`. Herdr reloads a mod as soon as its files change, and an update keeps each mod's `config.json`. The small `*-open` folders are launchers: a key can only open a mod, so they find or create the right tab, then close.
 
 ## Mods
 
