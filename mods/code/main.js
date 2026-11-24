@@ -96,6 +96,28 @@ const INSTALL_TOFU_LS = [
   'tar -xzf "$archive"; mkdir -p "$1/bin"; mv tofu-ls "$1/bin/tofu-ls"; cd /; rm -rf "$dir"',
 ].join("\n");
 
+// ShellCheck, which bash-language-server lints with: the official release, pinned, with the checksum GitHub records for each build.
+const SHELLCHECK_VERSION = "0.11.0";
+const SHELLCHECK_SHA256 = {
+  "linux.x86_64": "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198",
+  "linux.aarch64": "12b331c1d2db6b9eb13cfca64306b1b157a86eb69db83023e261eaa7e7c14588",
+  "darwin.x86_64": "3c89db4edcab7cf1c27bff178882e0f6f27f7afdf54e859fa041fca10febe4c6",
+  "darwin.aarch64": "56affdd8de5527894dca6dc3d7e0a99a873b0f004d7aabc30ae407d3f48b0a79",
+};
+const INSTALL_SHELLCHECK = [
+  'set -e; dir=$(mktemp -d); cd "$dir"',
+  'os=$(uname -s | tr A-Z a-z); arch=$(uname -m); [ "$arch" = arm64 ] && arch=aarch64',
+  'case "$os.$arch" in',
+  ...Object.entries(SHELLCHECK_SHA256).map(([target, sum]) => `  ${target}) sum=${sum};;`),
+  '  *) echo "no ShellCheck build for $os $arch" >&2; exit 1;;',
+  "esac",
+  'archive="shellcheck-v$2.$os.$arch.tar.xz"',
+  'curl -fsSLO "https://github.com/koalaman/shellcheck/releases/download/v$2/$archive"',
+  'if command -v sha256sum >/dev/null; then check="sha256sum -c -"; else check="shasum -a 256 -c -"; fi',
+  'echo "$sum  $archive" | $check >/dev/null',
+  'tar -xJf "$archive"; mkdir -p "$1/bin"; mv "shellcheck-v$2/shellcheck" "$1/bin/shellcheck"; cd /; rm -rf "$dir"',
+].join("\n");
+
 // A server: what runs it (`command`), what installs it (`install`, and `package` for npm), where it works (`workspace`), and what is
 // particular to it, if anything:
 //   prepare(view, { command, cwd, configured }) -> { command, settings, options }: another command to run, the settings it asks for
@@ -108,6 +130,19 @@ const npmServer = (pkg, bin, ...args) => ({ package: pkg, command: () => [`${SER
 const postgresConfig = async (_view, { command, cwd, configured }) => {
   if (configured || (await exec("test", ["-f", `${cwd}/postgres-language-server.jsonc`])).code === 0) return {};
   return { command: [...command, `--config-path=${MOD_DIR()}/postgres`] };
+};
+
+// Without ShellCheck bash-language-server completes and goes to definitions but reports no error. One on the PATH is used; otherwise the
+// release above is downloaded once next to the other servers. Optional: if that fails the server starts without it.
+const shellcheckSettings = async (view, { configured }) => {
+  if (configured || (await exec("sh", ["-c", "command -v shellcheck"])).code === 0) return {};
+  const binary = `${SERVERS_DIR()}/bin/shellcheck`;
+  try {
+    await view.install("bash", "shellcheck", binary);
+    return { settings: { bashIde: { shellcheckPath: binary } } };
+  } catch {
+    return {};
+  }
 };
 
 const SERVERS = {
@@ -132,7 +167,7 @@ const SERVERS = {
   opentofu: { command: () => [`${SERVERS_DIR()}/bin/tofu-ls`, "serve"], install: "tofu-ls" },
   typescript: { ...npmServer("@vtsls/language-server", "vtsls", "--stdio"), prepare: () => ({ settings: typescriptSettings() }) },
   vue: { ...npmServer("@vue/language-server", "vue-language-server", "--stdio"), connected: (view, client) => view.relayToTypescript(client) },
-  bash: npmServer("bash-language-server", "bash-language-server", "start"),
+  bash: { ...npmServer("bash-language-server", "bash-language-server", "start"), prepare: shellcheckSettings },
   dockerfile: npmServer("dockerfile-language-server-nodejs", "docker-langserver", "--stdio"),
   compose: npmServer("@microsoft/compose-language-service", "docker-compose-langserver", "--stdio"),
   postgres: { ...npmServer("@postgres-language-server/cli", "postgres-language-server", "lsp-proxy"), prepare: postgresConfig },
@@ -2278,7 +2313,9 @@ export default class Code extends View {
       ? await exec("npm", ["install", "--prefix", SERVERS_DIR(), "--no-fund", "--no-audit", ...NPM_SERVERS], { timeout })
       : kind === "rustup"
         ? await exec("rustup", ["component", "add", "rust-analyzer", "rust-src"], { cwd, timeout })
-        : await exec("sh", ["-c", INSTALL_TOFU_LS, "sh", SERVERS_DIR(), TOFU_LS_VERSION], { timeout });
+        : kind === "shellcheck"
+          ? await exec("sh", ["-c", INSTALL_SHELLCHECK, "sh", SERVERS_DIR(), SHELLCHECK_VERSION], { timeout })
+          : await exec("sh", ["-c", INSTALL_TOFU_LS, "sh", SERVERS_DIR(), TOFU_LS_VERSION], { timeout });
     if (result.code !== 0) throw new Error(`install failed: ${(result.stderr || result.stdout).trim().split("\n").pop()}`);
   }
 
