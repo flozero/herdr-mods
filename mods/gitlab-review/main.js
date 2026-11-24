@@ -48,6 +48,8 @@ const LIST_LABEL = { mine: "Mine", review: "To review", ignored: "Ignored", merg
 const cacheDir = () => `${appHome()}/mods/gitlab-review/.cache`;
 const ignoredFile = () => `${cacheDir()}/ignored.json`;
 const seenFile = () => `${cacheDir()}/seen.json`;
+const viewedFile = () => `${cacheDir()}/viewed.json`;
+const diffHash = (text) => { let h = 0; for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0; return String(h); };
 const editorFile = () => `${cacheDir()}/editor.json`;
 const prefsFile = () => `${cacheDir()}/prefs.json`;
 const notesFile = () => `${cacheDir()}/local.json`;
@@ -74,6 +76,13 @@ const REVIEW_STATE = {
   APPROVED: ["approved", "done"], REQUESTED_CHANGES: ["changes requested", "blocked"], REVIEWED: ["commented", "muted"],
   REVIEW_STARTED: ["reviewing", "accent"], UNAPPROVED: ["approval removed", "muted"], UNREVIEWED: ["pending", "dim"],
 };
+const isResolved = (x) => {
+  const first = humanNotes(x)[0];
+  return Boolean(first?.resolvable) && x.notes.every((n) => !n.resolvable || n.resolved);
+};
+const SUGGESTION = /```suggestion(?::-(\d+)\+(\d+))?[^\n]*\n([\s\S]*?)\n?```/;
+const REACTIONS = [["thumbsup", "👍"], ["thumbsdown", "👎"], ["eyes", "👀"], ["tada", "🎉"], ["heart", "❤️"], ["rocket", "🚀"]];
+const REVIEWED_STATES = new Set(["APPROVED", "REQUESTED_CHANGES", "REVIEWED", "UNAPPROVED"]);
 const AVATAR_COLORS = ["#5e6ad2", "#26b5ce", "#4cb782", "#f2c94c", "#f2994a", "#eb5757", "#bb87fc", "#95a2b3"];
 const initials = (name) => String(name ?? "?").split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 const avatarColor = (name) => AVATAR_COLORS[[...String(name ?? "")].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7) % AVATAR_COLORS.length];
@@ -120,6 +129,7 @@ export default class GitlabReview extends View {
     this.briefed = new Set();
     this.ignored = {};
     this.seen = {};
+    this.viewed = {};
     this.lastVisit = {};
     this.mine = {};
     this.replied = {};
@@ -190,6 +200,18 @@ export default class GitlabReview extends View {
     this.peopleInput.on("focus", (_e, cx) => { this.peopleFocused = true; cx.notify(); });
     this.peopleInput.on("blur", (_e, cx) => { this.peopleFocused = false; cx.notify(); });
     this.peoplePick = null;
+    this.titleEdit = null;
+    this.titleInput = InputState.new({ placeholder: "Title" });
+    this.titleInput.on("submit", (_e, cx) => this.saveTitle(cx));
+    this.titleInput.on("focus", (_e, cx) => { this.titleFocused = true; cx.notify(); });
+    this.titleInput.on("blur", (_e, cx) => { this.titleFocused = false; cx.notify(); });
+    this.noteEdit = null;
+    this.noteDraft = TextareaState.new({ rows: 3 });
+    this.noteDraft.set_auto_grow(3, 16);
+    this.noteDraft.on("submit", (e, cx) => { if (e?.secondary) this.saveNote(cx); });
+    this.noteDraft.on("focus", (_e, cx) => { this.noteFocused = true; cx.notify(); });
+    this.noteDraft.on("blur", (_e, cx) => { this.noteFocused = false; cx.notify(); });
+    this.reactPick = null;
     this.askedAt = 0;
     this.editors = null;
     this.editor = null;
@@ -207,7 +229,7 @@ export default class GitlabReview extends View {
   }
 
   keepFocus() {
-    if (props()?.overlay || this.composing || this.searchFocused || this.descFocused || this.peopleFocused) return;
+    if (props()?.overlay || this.composing || this.searchFocused || this.descFocused || this.peopleFocused || this.titleFocused || this.noteFocused) return;
     const f = focused();
     const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
     const was = this.lastPane;
@@ -297,6 +319,8 @@ export default class GitlabReview extends View {
 
   choosePerson(kind, u, cx) {
     if (kind === "author") this.pickAuthor(u, cx);
+    else if (kind === "labels") this.toggleLabel(u, cx);
+    else if (kind === "milestone") this.pickMilestone(u, cx);
     else this.togglePerson(kind, u, cx);
   }
 
@@ -497,6 +521,7 @@ export default class GitlabReview extends View {
     const key = this.project.path_with_namespace;
     this.ignored = (await this.readStore(ignoredFile()))[key] ?? {};
     this.seen = (await this.readStore(seenFile()))[key] ?? {};
+    this.viewed = (await this.readStore(viewedFile()))[key] ?? {};
   }
 
   async writeStore(file, value) {
@@ -507,6 +532,48 @@ export default class GitlabReview extends View {
     await fs.writeFile(tmp, JSON.stringify(all));
     const r = await exec("mv", ["-f", tmp, file]);
     if (r.code !== 0) throw new Error(r.stderr.trim());
+  }
+
+  viewKey(d) {
+    return String(d.mr.state === "local" ? `branch:${d.mr.source_branch}` : d.mr.iid);
+  }
+
+  isViewed(d, f) {
+    return this.viewed[this.viewKey(d)]?.[f.new_path] === diffHash(f.diff ?? "");
+  }
+
+  toggleViewed(d, f, cx, advance = false) {
+    const key = this.viewKey(d);
+    const mine = { ...(this.viewed[key] ?? {}) };
+    const was = this.isViewed(d, f);
+    if (was) delete mine[f.new_path]; else mine[f.new_path] = diffHash(f.diff ?? "");
+    this.viewed = { ...this.viewed, [key]: mine };
+    const open = new Set(Object.keys(this.details).map(String));
+    const kept = Object.fromEntries(Object.entries(this.viewed).filter(([k]) => k.startsWith("branch:") || open.has(k) || [...this.mrs, ...this.authored].some((m) => String(m.iid) === k)));
+    this.persist(viewedFile(), kept, cx);
+    if (advance && !was) this.moveFile(1, cx);
+    cx.notify();
+  }
+
+  createMr(cx) {
+    const d = this.details[this.iid];
+    if (!this.local || this.remote || !d || this.creatingMr) return;
+    const base = String(d.base ?? "").replace(/^origin\//, "");
+    this.creatingMr = true;
+    this.say(`Pushing ${d.mr.source_branch} and opening a draft merge request…`, cx);
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("glab", ["mr", "create", "--fill", "--draft", "--yes", "--push", ...(base ? ["--target-branch", base] : [])], { cwd: this.top });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim().split("\n").pop() || "glab mr create failed");
+        if (await this.findRemote(cx)) await this.loadBranch(cx);
+        this.say(this.remote ? `Draft merge request !${this.remote.iid} opened` : "Merge request opened", cx, "success");
+      } catch (e) {
+        this.say(`Couldn't open the merge request: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        this.creatingMr = false;
+        cx.notify();
+      }
+    });
   }
 
   persist(file, value, cx) {
@@ -718,7 +785,7 @@ export default class GitlabReview extends View {
   openThreads(d) {
     return d.threads.filter((x) => {
       const first = humanNotes(x)[0];
-      return first && !(first.resolvable && x.notes.every((n) => !n.resolvable || n.resolved));
+      return first && !isResolved(x);
     });
   }
 
@@ -761,13 +828,14 @@ export default class GitlabReview extends View {
 
   async loadBranch(cx) {
     const iid = this.iid, remote = this.remote;
-    const [local, mr, threads, drafts, approvals, side] = await Promise.all([
+    const [local, mr, threads, drafts, approvals, side, awards] = await Promise.all([
       this.call(cx, "local", () => this.localDiff()),
       remote ? this.call(cx, `mr:${remote.iid}`, () => gl.mergeRequest(this.top, remote.iid)) : null,
       remote ? this.call(cx, `threads:${remote.iid}`, () => gl.discussions(this.top, remote.iid)) : null,
       remote ? this.call(cx, `drafts:${remote.iid}`, () => gl.drafts(this.top, remote.iid)) : null,
       remote ? this.call(cx, `approvals:${remote.iid}`, () => gl.approvals(this.top, remote.iid)) : null,
       remote && this.project ? this.call(cx, `side:${remote.iid}`, () => gl.sidebar(this.top, this.project.path_with_namespace, remote.iid)) : null,
+      remote && this.project ? gl.awards(this.top, this.project.path_with_namespace, remote.iid).catch(() => null) : null,
     ]);
     const prev = this.details[iid];
     if (!local && !prev) return;
@@ -787,6 +855,7 @@ export default class GitlabReview extends View {
       side: remote ? side ?? prev?.side ?? null : null,
       since: null, newCommits: [], state: side && this.user ? mySide(side, this.user.username) : null,
       stack: prev?.stack ?? null,
+      awards: awards ?? prev?.awards ?? null,
     };
     cx.notify();
     const shown = mr ?? prev?.mr ?? pseudo;
@@ -1125,7 +1194,7 @@ export default class GitlabReview extends View {
 
   async loadMr(cx, iid) {
     if (this.local) return this.loadBranch(cx);
-    const [mr, files, threads, drafts, approvals, side] = await Promise.all([
+    const [mr, files, threads, drafts, approvals, side, awards] = await Promise.all([
       this.call(cx, `mr:${iid}`, () => gl.mergeRequest(this.top, iid)).then((mr) => {
         if (mr) this.loadStack(mr).then((stack) => { if (this.details[iid]) { this.details[iid].stack = stack; cx.notify(); } else this.pendingStack = { iid, stack }; });
         return mr;
@@ -1135,6 +1204,7 @@ export default class GitlabReview extends View {
       this.call(cx, `drafts:${iid}`, () => gl.drafts(this.top, iid)),
       this.call(cx, `approvals:${iid}`, () => gl.approvals(this.top, iid)),
       this.call(cx, `side:${iid}`, () => gl.sidebar(this.top, this.project.path_with_namespace, iid)),
+      gl.awards(this.top, this.project.path_with_namespace, iid).catch(() => null),
     ]);
     if (!mr) return;
     const prev = this.details[iid];
@@ -1161,6 +1231,7 @@ export default class GitlabReview extends View {
       state: side ? mySide(side, this.user.username) : prev?.state ?? null,
       side: side ?? prev?.side ?? null,
       stack: this.pendingStack?.iid === iid ? this.pendingStack.stack : prev?.stack ?? null,
+      awards: awards ?? prev?.awards ?? null,
     };
     if (this.pendingStack?.iid === iid) this.pendingStack = null;
     cx.notify();
@@ -1611,6 +1682,14 @@ export default class GitlabReview extends View {
     if (this.peoplePick?.kind === kind) { this.closePeople(cx); return; }
     this.peoplePick = { kind, sel: 0, found: null };
     this.peopleInput.set_value("");
+    if (kind === "labels" || kind === "milestone") {
+      cx.spawn(async (cx) => {
+        const list = await (kind === "labels" ? gl.labels(this.top, "") : gl.milestones(this.top)).catch(() => null);
+        if (this.peoplePick?.kind !== kind || !Array.isArray(list)) return;
+        this.peoplePick.found = list.map((x) => ({ id: x.id, title: x.title ?? x.name, color: x.color, textColor: x.text_color }));
+        cx.notify();
+      });
+    }
     cx.timer.after(0, () => this.peopleInput.focus());
     cx.notify();
   }
@@ -1624,6 +1703,7 @@ export default class GitlabReview extends View {
   peopleChoices() {
     const p = this.peoplePick;
     if (p?.kind === "author") return this.authorChoices(p);
+    if (p?.kind === "labels" || p?.kind === "milestone") return this.tagChoices(p);
     const s = this.details[this.iid]?.side;
     if (!p || !s) return [];
     const on = new Set(s[p.kind].map((u) => u.username));
@@ -1635,6 +1715,55 @@ export default class GitlabReview extends View {
       .filter((u) => !q || `${u.username} ${u.name ?? ""}`.toLowerCase().includes(q))
       .map((u) => ({ username: u.username, name: u.name ?? u.username, on: on.has(u.username) }))
       .slice(0, 12);
+  }
+
+  tagChoices(p) {
+    const s = this.details[this.iid]?.side;
+    if (!s) return [];
+    const q = this.peopleInput.value().trim().toLowerCase();
+    const on = new Set(p.kind === "labels" ? s.labels.map((l) => l.title) : s.milestone ? [s.milestone.title] : []);
+    const current = p.kind === "labels" ? s.labels.map((l) => ({ title: l.title, color: l.color, textColor: l.textColor })) : [];
+    const seen = new Set();
+    return [...current, ...(p.found ?? [])].filter((x) => x.title && !seen.has(x.title) && seen.add(x.title))
+      .filter((x) => !q || x.title.toLowerCase().includes(q))
+      .map((x) => ({ ...x, username: x.title, name: x.title, on: on.has(x.title) }))
+      .slice(0, 14);
+  }
+
+  toggleLabel(u, cx) {
+    const mr = this.draftable(), d = this.details[this.iid];
+    if (!mr || !d?.side) return;
+    const before = d.side;
+    d.side = { ...d.side, labels: u.on ? d.side.labels.filter((l) => l.title !== u.title) : [...d.side.labels, { title: u.title, color: u.color, textColor: u.textColor ?? "#ffffff" }] };
+    this.say(u.on ? `Label ${u.title} removed` : `Label ${u.title} added`, cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.setLabels(this.top, mr.iid, u.on ? [] : [u.title], u.on ? [u.title] : []);
+      } catch (e) {
+        d.side = before;
+        this.say(`Couldn't change the labels of !${mr.iid}: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
+  }
+
+  pickMilestone(u, cx) {
+    const mr = this.draftable(), d = this.details[this.iid];
+    if (!mr || !d?.side) return;
+    const before = d.side;
+    d.side = { ...d.side, milestone: u.on ? null : { title: u.title } };
+    this.closePeople(cx);
+    this.say(u.on ? `Milestone ${u.title} removed` : `Milestone set to ${u.title}`, cx, "success");
+    cx.spawn(async (cx) => {
+      try {
+        await gl.setMilestone(this.top, mr.iid, u.on ? null : u.id);
+      } catch (e) {
+        d.side = before;
+        this.say(`Couldn't change the milestone of !${mr.iid}: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
   }
 
   authorChoices(p) {
@@ -1659,11 +1788,36 @@ export default class GitlabReview extends View {
     cx.timer.after(250, (cx) => {
       if (gen !== this.peopleGen) return;
       cx.spawn(async (cx) => {
-        const list = await gl.users(this.top, q).catch(() => null);
-        if (gen !== this.peopleGen || !this.peoplePick || !Array.isArray(list)) return;
-        this.peoplePick.found = list.map((u) => ({ username: u.username, name: u.name }));
+        const kind = this.peoplePick?.kind;
+        if (kind === "milestone") return;
+        const list = await (kind === "labels" ? gl.labels(this.top, q) : gl.users(this.top, q)).catch(() => null);
+        if (gen !== this.peopleGen || this.peoplePick?.kind !== kind || !Array.isArray(list)) return;
+        this.peoplePick.found = kind === "labels"
+          ? [...(this.peoplePick.found ?? []), ...list.map((x) => ({ id: x.id, title: x.name, color: x.color, textColor: x.text_color }))]
+          : list.map((u) => ({ username: u.username, name: u.name }));
         cx.notify();
       });
+    });
+  }
+
+  rerequestReview(r, cx) {
+    const mr = this.draftable();
+    const d = this.details[this.iid];
+    if (!mr || !d?.side || !this.project) return;
+    const before = d.side;
+    d.side = { ...d.side, reviewers: d.side.reviewers.map((x) => (x.username === r.username ? { ...x, state: "UNREVIEWED" } : x)) };
+    this.say(`Review requested again from ${r.name ?? r.username} on !${mr.iid}`, cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.rerequestReview(this.top, this.project.path_with_namespace, mr.iid, r.id);
+        const side = await gl.sidebar(this.top, this.project.path_with_namespace, mr.iid).catch(() => null);
+        if (side) { d.side = side; d.state = mySide(side, this.user?.username); }
+      } catch (e) {
+        d.side = before;
+        this.say(`Couldn't request a review from ${r.name ?? r.username} again: ${e?.message ?? e}`, cx, "error");
+      }
+      cx.notify();
     });
   }
 
@@ -1708,6 +1862,7 @@ export default class GitlabReview extends View {
 
   peoplePicker(t) {
     const p = this.peoplePick, list = this.peopleChoices(), sel = Math.min(p.sel, list.length - 1);
+    const tags = p.kind === "labels" || p.kind === "milestone";
     const q = this.peopleInput.value().trim();
     return v_flex().w_full().gap(1).p(4).rounded(8).border_1().border_color(t.border).bg(t.popover)
       .child(h_flex().h(28).px(8).mb(2).items_center().rounded(6).border_1().border_color(this.peopleFocused ? t.accent : t.border).bg(t.background)
@@ -1716,11 +1871,11 @@ export default class GitlabReview extends View {
         .bg(n === sel ? t.selected : t.popover).hover((s) => s.bg(n === sel ? t.selected : t.hover))
         .on_mouse_down("left", stop).on_click((_e, cx) => this.choosePerson(p.kind, u, cx))
         .child(div().w(12).flex_none().text_size(11).text_color(t.accent).child(this.peopleBusy === u.username ? "…" : u.on ? "✓" : ""))
-        .child(this.avatar(t, u.name, 18))
+        .child(tags ? div().w(12).h(12).flex_none().rounded(3).bg(u.color ?? t.border) : this.avatar(t, u.name, 18))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(u.username === this.user?.username ? t.accent : t.foreground).child(u.name))
-        .child(div().flex_none().max_w(90).truncate().text_size(10.5).text_color(t.dim).child(`@${u.username}`))))
-      .when(!list.length, (el) => el.child(div().px(6).py(4).text_size(11.5).text_color(t.dim).child(q.length < 2 ? "Type a name" : "Nobody matches")))
-      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child(p.kind === "author" ? "↑↓ choose · Enter show their open merge requests · Esc close" : "↑↓ choose · Enter add or remove · Esc close"));
+        .when(!tags, (el) => el.child(div().flex_none().max_w(90).truncate().text_size(10.5).text_color(t.dim).child(`@${u.username}`)))))
+      .when(!list.length, (el) => el.child(div().px(6).py(4).text_size(11.5).text_color(t.dim).child(tags ? (p.found ? "Nothing matches" : "Loading…") : q.length < 2 ? "Type a name" : "Nobody matches")))
+      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child(p.kind === "author" ? "↑↓ choose · Enter show their open merge requests · Esc close" : p.kind === "milestone" ? "↑↓ choose · Enter set or remove · Esc close" : "↑↓ choose · Enter add or remove · Esc close"));
   }
 
   draftButton(t) {
@@ -1815,6 +1970,32 @@ export default class GitlabReview extends View {
       await this.wait(cx, 250);
     }
     return shown();
+  }
+
+  askRebase(cx) {
+    const mr = this.draftable();
+    if (!mr || this.rebasing) return;
+    const text = `Merge request !${mr.iid} (${mr.source_branch}) is behind origin/${mr.target_branch}. Fetch, rebase ${mr.source_branch} on origin/${mr.target_branch}, resolve the conflicts if any, run the checks, then push with --force-with-lease. Tell me what you changed.`;
+    this.rebasing = true;
+    this.say(`Asking ${this.agentName()} to rebase ${mr.source_branch}…`, cx);
+    cx.spawn(async (cx) => {
+      try {
+        if (this.local) await this.handToClaude(text, cx);
+        else {
+          const { path, created, main } = await branchCheckout(exec, this.top, mr.source_branch, home());
+          if (created && path !== main) await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: mr.source_branch });
+          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", `rebase-${mr.iid}-${Date.now().toString(36)}`, "--cwd", path, "--", ...agentArgv(this.config), text]);
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+          await this.showRight(cx, JSON.parse(r.stdout).address);
+        }
+        this.say(`${this.agentName()} is rebasing ${mr.source_branch}, on the right`, cx, "success");
+      } catch (e) {
+        this.say(`Couldn't ask for the rebase: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        this.rebasing = false;
+        cx.notify();
+      }
+    });
   }
 
   async handToClaude(text, cx) {
@@ -1927,6 +2108,15 @@ export default class GitlabReview extends View {
       else if (k === "down" || k === "up") { this.handle.focus(); cx.notify(); }
       return;
     }
+    if (this.titleFocused) {
+      if (k === "escape") { this.cancelTitle(cx); cx.stop_propagation(); }
+      return;
+    }
+    if (this.noteFocused) {
+      if (k === "cmd-enter" || k === "ctrl-enter") { this.saveNote(cx); cx.stop_propagation(); }
+      else if (k === "escape") { this.noteEdit = null; this.handle.focus(); cx.notify(); cx.stop_propagation(); }
+      return;
+    }
     if (this.descFocused) {
       if (this.mentionKey(k, cx)) { cx.stop_propagation(); return; }
       if (k === "cmd-enter" || k === "ctrl-enter") { this.saveDescription(cx); cx.stop_propagation(); }
@@ -1978,6 +2168,7 @@ export default class GitlabReview extends View {
       e: () => (this.editors?.includes(HERDR_EDITOR) ? this.openEditor(HERDR_EDITOR, cx) : this.editor ? this.openEditor(this.editor, cx) : this.toggleEditorMenu(cx)),
       "shift-e": () => this.toggleEditorMenu(cx),
       s: () => this.tab === "changes" && this.toggleSplit(cx),
+      v: () => { const f = this.tab === "changes" && this.currentFile(); if (f) this.toggleViewed(this.details[this.iid], f, cx, true); },
       d: () => this.tab === "description" && this.editDescription(cx),
       "shift-d": () => this.toggleDraft(cx),
       y: () => { const f = this.tab === "changes" && this.currentFile(); if (f) this.copy(f.new_path, cx); },
@@ -2257,7 +2448,7 @@ export default class GitlabReview extends View {
         ? div().id("h-iid").text_size(14).font_semibold().cursor_pointer().hover((s) => s.text_color(t.accent))
           .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(`!${this.remote.iid}`, cx)).child(`!${this.remote.iid}`)
         : div().text_size(14).font_semibold().child("Branch"))
-      .child(div().flex_1().min_w(0).truncate().child(d ? (this.remote ? d.mr.title : this.top.split("/").pop()) : this.top ?? ""))
+      .child(d && this.remote ? this.titleView(t, d.mr.title) : div().flex_1().min_w(0).truncate().child(d ? this.top.split("/").pop() : this.top ?? ""))
       .when(busy, (el) => el.child(div().text_size(11).text_color(t.dim).child("loading…")))
       .when(!d, (el) => el.child(this.button(t, "h-search", "Search  ⌘F", (cx) => this.openSearch(cx)))
         .child(this.button(t, "h-refresh", "↻  ⌘R", (cx) => this.reload(cx))));
@@ -2285,7 +2476,7 @@ export default class GitlabReview extends View {
       .when(!this.iid, (el) => el.child(div().text_size(14).font_semibold().child("To review")))
       .when(Boolean(this.iid), (el) => el.child(div().id("h-iid").text_size(14).font_semibold().cursor_pointer().hover((s) => s.text_color(t.accent))
         .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(`!${this.iid}`, cx)).child(`!${this.iid}`)))
-      .when(Boolean(d), (el) => el.child(div().flex_1().min_w(0).truncate().child(d.mr.title)))
+      .when(Boolean(d), (el) => el.child(this.titleView(t, d.mr.title)))
       .when(!d, (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(this.project?.path_with_namespace ?? "")))
       .when(busy, (el) => el.child(div().text_size(11).text_color(t.dim).child("loading…")))
       .when(Boolean(d) && Boolean(this.ignored[this.iid]), (el) => el.child(this.chip(t, "ignored")))
@@ -2374,9 +2565,9 @@ export default class GitlabReview extends View {
     const hint = this.descFocused ? "⌘↵ save the description · Esc leave the editor (Cancel drops the changes)"
       : this.composing && this.local ? "⌘↵ add to your review · Esc leave"
       : this.composing ? `⌘↵ add to your review (pending) · ⌥↵ ask ${this.agentName()} (private) · Esc leave`
-      : this.local && !this.searchFocused ? `1–4 / Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, ← back) · c comment, ⌘↵ add to your review · a send the review to ${this.agentName()} · s split · d edit the description · ⇧D draft/ready · e editor · / search · ⌘R refresh`
+      : this.local && !this.searchFocused ? `1–4 / Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, ← back) · c comment, ⌘↵ add to your review · a send the review to ${this.agentName()} · s split · v viewed · d edit the description · ⇧D draft/ready · e editor · / search · ⌘R refresh`
       : this.searchFocused ? "Type to filter what's loaded · Enter keep · Esc clear"
-      : this.iid ? `/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask ${this.agentName()} · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back`
+      : this.iid ? `/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · v viewed · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask ${this.agentName()} · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back`
       : this.picked().length > 1 ? `${this.picked().length} selected · i ignore or restore them all · Esc unselect`
       : "1–5 / Tab ⇧Tab lists · p pick someone · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
@@ -2610,10 +2801,15 @@ export default class GitlabReview extends View {
           .when(mr.state === "opened" && (mr.has_conflicts || mr.detailed_merge_status === "conflict"), (el) => el.child(this.chip(t, "merge conflict", t.blocked)))
           .when(Boolean(mr.detailed_merge_status) && mr.state === "opened" && mr.detailed_merge_status !== "conflict", (el) => el.child(this.chip(t, mr.detailed_merge_status.replace(/_/g, " "))))
           .when(Boolean(mr.head_pipeline?.status), (el) => el.child(this.pipelineChip(t, mr))))
+        .when(mr.state === "opened" && mr.diverged_commits_count > 0, (el) => el.child(h_flex().gap(6).items_center().flex_wrap()
+          .child(this.chip(t, `${mr.diverged_commits_count} commit${mr.diverged_commits_count > 1 ? "s" : ""} behind ${mr.target_branch}`, t.blocked))
+          .child(this.sideLink(t, "sa-rebase", this.rebasing ? "Asking…" : `Ask ${this.agentName()} to rebase`, (cx) => this.askRebase(cx)))))
         .when(!this.local && !this.lastVisit[mr.iid] && mr.state === "opened", (el) => el.child(h_flex().child(this.chip(t, "first visit", t.accent))))
         .when(!this.local && Boolean(this.lastVisit[mr.iid]), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`You last looked ${agoText(this.lastVisit[mr.iid].at)}`)))
         .when(Boolean(this.draftable()), (el) => el.child(h_flex().child(this.draftButton(t))))
-      : none(d.status?.pushed ? "No merge request for this branch yet" : "Not pushed yet, no merge request");
+      : v_flex().w_full().gap(8).child(none(d.status?.pushed ? "No merge request for this branch yet" : "Not pushed yet, no merge request"))
+        .when(this.local && !this.remote && Boolean(mr.source_branch) && mr.source_branch !== String(d.base ?? "").replace(/^origin\//, ""), (el) =>
+          el.child(h_flex().child(this.button(t, "sa-create-mr", this.creatingMr ? "Opening…" : d.status?.pushed ? "Open a draft MR" : "Push and open a draft MR", (cx) => this.createMr(cx), true, !this.creatingMr))));
     const actions = h_flex().w_full().gap(6).flex_wrap()
       .child(this.button(t, "sa-claude", `Ask ${this.agentName()}  g`, (cx) => this.openClaude(cx), true))
       .when(Boolean(mr.web_url), (el) => el.child(this.button(t, "sa-web", "Browser  o", (cx) => cx.open_url(mr.web_url))))
@@ -2663,11 +2859,19 @@ export default class GitlabReview extends View {
     return side
       .when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)))
       .child(peopleSection("assignees", "Assignees"))
-      .child(peopleSection("reviewers", "Reviewers", reviewState))
+      .child(peopleSection("reviewers", "Reviewers", (r) => editable && r.id && r.username !== this.user?.username && REVIEWED_STATES.has(r.state)
+        ? h_flex().flex_none().gap(6).items_center().child(reviewState(r))
+          .child(this.sideLink(t, `sp-rereview-${r.username}`, "Re-request", (cx) => this.rerequestReview(r, cx)))
+        : reviewState(r)))
       .child(this.sideSection(t, "Approvals", null, div().text_size(12).text_color(left === 0 && (required > 0 || approvedBy) ? t.done : t.muted).child(approvals)))
       .child(this.sideSection(t, "Labels", s.labels.length || null,
-        s.labels.length ? h_flex().w_full().gap(5).flex_wrap().children(s.labels.map((l) => this.labelPill(t, l))) : none("None")))
-      .when(Boolean(s.milestone), (el) => el.child(this.sideSection(t, "Milestone", null, div().text_size(12).child(s.milestone.title))))
+        v_flex().w_full().gap(6).when(this.peoplePick?.kind === "labels", (el) => el.child(this.peoplePicker(t)))
+          .child(s.labels.length ? h_flex().w_full().gap(5).flex_wrap().children(s.labels.map((l) => this.labelPill(t, l))) : none("None")),
+        editable ? this.sideLink(t, "sp-edit-labels", this.peoplePick?.kind === "labels" ? "Done" : "Edit", (cx) => this.openPeople("labels", cx), this.peoplePick?.kind === "labels") : null))
+      .when(Boolean(s.milestone) || editable, (el) => el.child(this.sideSection(t, "Milestone", null,
+        v_flex().w_full().gap(6).when(this.peoplePick?.kind === "milestone", (el) => el.child(this.peoplePicker(t)))
+          .child(s.milestone ? div().text_size(12).child(s.milestone.title) : none("None")),
+        editable ? this.sideLink(t, "sp-edit-milestone", this.peoplePick?.kind === "milestone" ? "Done" : "Edit", (cx) => this.openPeople("milestone", cx), this.peoplePick?.kind === "milestone") : null)))
       .child(this.sideSection(t, "Participants", s.participants.length || null,
         s.participants.length ? h_flex().w_full().gap(4).flex_wrap().children(s.participants.map((u) =>
           div().id(`spa-${u.username}`).cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(`https://gitlab.com/${u.username}`))
@@ -2794,7 +2998,9 @@ export default class GitlabReview extends View {
     const text = q ? this.descBlocks(d).join("\n\n---\n\n") || "_No match in the description_" : d.mr.description?.trim() || "_No description_";
     return v_flex().id("glr-desc").flex_1().min_h(0).p(16).pb(120).gap(14).overflow_y_scrollbar()
       .when(!q, (el) => el.child(this.newsPanel(t, d)))
-      .when(!q, (el) => el.child(h_flex().justify_end().child(this.button(t, "desc-edit", "Edit description  d", (cx) => this.editDescription(cx)))))
+      .when(!q, (el) => el.child(h_flex().gap(8).items_center()
+        .child(div().flex_1().child(d.awards ? this.reactionsRow(t, `mr-${d.mr.iid}`, d.awards.mrId, d.awards.mr) : div()))
+        .child(this.button(t, "desc-edit", "Edit description  d", (cx) => this.editDescription(cx)))))
       .children(this.markdownView(t, `desc-${d.mr.iid}-${q}`, text, d));
   }
 
@@ -2840,30 +3046,254 @@ export default class GitlabReview extends View {
       ].filter(Boolean));
   }
 
-  noteView(t, n, key) {
+  noteView(t, n, key, x = null) {
+    const mine = Boolean(x) && Boolean(this.draftable()) && n.author?.username === this.user?.username;
+    const editing = this.noteEdit?.id === n.id;
+    const link = (id, label, action, color = t.dim) => div().id(id).text_size(11).text_color(color).cursor_pointer().hover((s) => s.text_color(t.foreground))
+      .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
     return v_flex().gap(4)
       .child(h_flex().gap(8).items_center().text_size(11.5)
         .child(div().font_semibold().child(who(n.author)))
         .child(div().text_color(t.dim).child(ago(n.created_at)))
-        .when(this.isFresh(n), (el) => el.child(this.chip(t, "new since your last visit", t.accent))))
-      .children(this.markdownView(t, key, n.body ?? "", this.details[this.iid]));
+        .when(this.isFresh(n), (el) => el.child(this.chip(t, "new since your last visit", t.accent)))
+        .when(mine && !editing, (el) => el.child(div().flex_1())
+          .child(link(`${key}-edit`, "Edit", (cx) => this.editNote(n, cx)))
+          .child(link(`${key}-del`, this.noteEdit?.deleting === n.id ? "Click again to delete" : "Delete", (cx) => this.removeNoteFromThread(x, n, cx),
+            this.noteEdit?.deleting === n.id ? t.blocked : t.dim))))
+      .when(editing, (el) => el.child(v_flex().gap(6)
+        .child(div().id(`${key}-area`).w_full().min_w(0).rounded(8).border_1().border_color(this.noteFocused ? t.accent : t.border).bg(t.background)
+          .on_mouse_down("left", stop).child(Textarea.new(this.noteDraft).w_full()))
+        .child(h_flex().gap(6).justify_end()
+          .child(this.button(t, `${key}-cancel`, "Cancel  Esc", (cx) => { this.noteEdit = null; this.handle.focus(); cx.notify(); }))
+          .child(this.button(t, `${key}-save`, "Save  ⌘↵", (cx) => this.saveNote(cx), true)))))
+      .when(!editing, (el) => el.children(this.markdownView(t, key, n.body ?? "", this.details[this.iid])))
+      .when(Boolean(x) && !String(n.id).startsWith("pending-"), (el) => el.child(this.reactionsRow(t, key, `gid://gitlab/Note/${n.id}`, this.details[this.iid]?.awards?.notes?.[String(n.id)] ?? [])));
+  }
+
+  reactionsRow(t, key, awardable, list) {
+    const me = this.user?.username;
+    const groups = new Map();
+    for (const a of list) groups.set(a.name, { emoji: a.emoji ?? a.name, users: [...(groups.get(a.name)?.users ?? []), a.username] });
+    const open = this.reactPick === key;
+    const pill = (id, label, on, action, title = null) => h_flex().id(id).h(20).px(6).gap(4).items_center().rounded(10).border_1().text_size(11).cursor_pointer()
+      .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label).when(Boolean(title), (el) => el.child(div().text_color(t.dim).child(title)));
+    return h_flex().gap(4).items_center().flex_wrap()
+      .children([...groups].map(([name, g]) => pill(`${key}-r-${name}`, g.emoji, g.users.includes(me), (cx) => this.toggleReaction(awardable, name, g.emoji, cx), String(g.users.length))))
+      .when(Boolean(this.details[this.iid]?.awards), (el) => el.child(pill(`${key}-r-add`, open ? "×" : "☺ +", open, (cx) => { this.reactPick = open ? null : key; cx.notify(); })))
+      .when(open, (el) => el.children(REACTIONS.filter(([name]) => !groups.has(name)).map(([name, emoji]) =>
+        pill(`${key}-rp-${name}`, emoji, false, (cx) => { this.reactPick = null; this.toggleReaction(awardable, name, emoji, cx); }))));
+  }
+
+  toggleReaction(awardable, name, emoji, cx) {
+    const d = this.details[this.iid];
+    if (!d?.awards || !this.user) return;
+    const me = this.user.username;
+    const noteId = awardable.startsWith("gid://gitlab/Note/") ? awardable.split("/").pop() : null;
+    const list = noteId ? d.awards.notes[noteId] ?? [] : d.awards.mr;
+    const had = list.some((a) => a.name === name && a.username === me);
+    const next = had ? list.filter((a) => !(a.name === name && a.username === me)) : [...list, { name, emoji, username: me }];
+    const set = (value) => { if (noteId) d.awards.notes = { ...d.awards.notes, [noteId]: value }; else d.awards.mr = value; };
+    set(next);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.toggleAward(this.top, awardable, name);
+      } catch (e) {
+        set(list);
+        this.say(`Couldn't ${had ? "remove" : "add"} ${emoji}: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
+  }
+
+  editNote(n, cx) {
+    this.noteEdit = { id: n.id, original: n.body ?? "" };
+    this.noteDraft.set_value(n.body ?? "");
+    cx.timer.after(0, () => this.noteDraft.focus());
+    cx.notify();
+  }
+
+  saveNote(cx) {
+    const mr = this.draftable(), d = this.details[this.iid], edit = this.noteEdit;
+    if (!mr || !d || !edit?.id) return;
+    const body = this.noteDraft.value().trim();
+    if (!body) { this.say("The comment is empty: use Delete to remove it", cx); return; }
+    const patch = (text) => { for (const x of d.threads) x.notes = x.notes.map((n) => (n.id === edit.id ? { ...n, body: text } : n)); };
+    patch(body);
+    this.noteEdit = null;
+    this.handle.focus();
+    this.say("Comment saved", cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.editNote(this.top, mr.iid, edit.id, body);
+      } catch (e) {
+        patch(edit.original);
+        this.noteEdit = edit;
+        this.noteDraft.set_value(body);
+        this.say(`Couldn't save the comment: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
+  }
+
+  removeNoteFromThread(x, n, cx) {
+    const mr = this.draftable(), d = this.details[this.iid];
+    if (!mr || !d) return;
+    if (this.noteEdit?.deleting !== n.id) {
+      this.noteEdit = { deleting: n.id };
+      cx.timer.after(3000, (cx) => { if (this.noteEdit?.deleting === n.id) { this.noteEdit = null; cx.notify(); } });
+      cx.notify();
+      return;
+    }
+    this.noteEdit = null;
+    const before = d.threads;
+    x.notes = x.notes.filter((y) => y.id !== n.id);
+    d.threads = d.threads.filter((y) => humanNotes(y).length);
+    this.say("Comment deleted", cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.deleteNote(this.top, mr.iid, n.id);
+      } catch (e) {
+        x.notes = [...x.notes, n].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+        d.threads = before;
+        this.say(`Couldn't delete the comment: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
+  }
+
+  editTitle(cx) {
+    const mr = this.draftable();
+    if (!mr) return;
+    this.titleEdit = { iid: mr.iid, original: mr.title };
+    this.titleInput.set_value(mr.title);
+    cx.timer.after(0, () => this.titleInput.focus());
+    cx.notify();
+  }
+
+  cancelTitle(cx) {
+    this.titleEdit = null;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  saveTitle(cx) {
+    const edit = this.titleEdit;
+    if (!edit) return;
+    const title = this.titleInput.value().trim();
+    this.titleEdit = null;
+    this.handle.focus();
+    if (!title || title === edit.original) { cx.notify(); return; }
+    this.patchMr(edit.iid, (m) => ({ ...m, title }));
+    this.say(`Title of !${edit.iid} saved`, cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.setTitle(this.top, edit.iid, title);
+      } catch (e) {
+        this.patchMr(edit.iid, (m) => ({ ...m, title: edit.original }));
+        this.say(`Couldn't save the title: ${e?.message ?? e}`, cx, "error");
+        cx.notify();
+      }
+    });
+  }
+
+  titleView(t, title) {
+    if (this.titleEdit) {
+      return h_flex().flex_1().min_w(0).h(28).px(8).items_center().rounded(6).border_1().border_color(this.titleFocused ? t.accent : t.border).bg(t.background)
+        .on_mouse_down("left", stop).child(Input.new(this.titleInput).flex_1().h_full().text_size(13));
+    }
+    const editable = Boolean(this.draftable());
+    return div().id("h-title").flex_1().min_w(0).truncate().when(editable, (el) => el.cursor_text().hover((s) => s.text_color(t.accent)))
+      .on_mouse_down("left", stop).on_click((_e, cx) => { if (editable) this.editTitle(cx); }).child(title);
+  }
+
+  toggleResolve(x, cx) {
+    const mr = this.draftable();
+    if (!mr || x.resolving) return;
+    const resolved = !isResolved(x);
+    const before = x.notes;
+    x.notes = x.notes.map((n) => (n.resolvable ? { ...n, resolved } : n));
+    x.resolving = true;
+    this.say(resolved ? "Thread resolved" : "Thread reopened", cx, "success");
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        await gl.resolveDiscussion(this.top, mr.iid, x.id, resolved);
+      } catch (e) {
+        x.notes = before;
+        this.say(`Couldn't ${resolved ? "resolve" : "reopen"} the thread: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        x.resolving = false;
+        cx.notify();
+      }
+    });
+  }
+
+  applySuggestion(x, n, cx) {
+    const mr = this.draftable();
+    const pos = humanNotes(x)[0]?.position;
+    const m = String(n.body ?? "").match(SUGGESTION);
+    if (!mr || !m || !pos?.new_line || !pos.new_path || this.applying) return;
+    const above = Number(m[1] ?? 0), below = Number(m[2] ?? 0);
+    const start = pos.new_line - 1 - above, end = pos.new_line + below;
+    this.applying = n.id;
+    this.say(`Applying the suggestion on ${pos.new_path}…`, cx);
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const [now, then] = await Promise.all([gl.fileAt(this.top, pos.new_path, mr.source_branch), gl.raw(this.top, pos.new_path, pos.head_sha)]);
+        const lines = now.text.split("\n");
+        if (lines.slice(start, end).join("\n") !== then.split("\n").slice(start, end).join("\n")) throw new Error("these lines changed since the comment");
+        const next = [...lines.slice(0, start), ...(m[3] === "" ? [] : m[3].split("\n")), ...lines.slice(end)].join("\n");
+        await gl.commitFile(this.top, mr.source_branch, `Apply suggestion from @${n.author?.username ?? "a reviewer"}`, pos.new_path, next, now.lastCommit);
+        if (!isResolved(x)) await gl.resolveDiscussion(this.top, mr.iid, x.id, true).catch(() => null);
+        this.say(`Suggestion applied on ${mr.source_branch}`, cx, "success");
+        await this.loadMr(cx, this.iid);
+      } catch (e) {
+        this.say(`Couldn't apply the suggestion: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        this.applying = null;
+        cx.notify();
+      }
+    });
+  }
+
+  suggestLines(cx) {
+    const t = this.target;
+    if (t.kind !== "line" || !t.row.new) { this.say("Pick a line of the new code first", cx); return; }
+    const from = t.fromRow?.new ?? t.row.new;
+    const lines = t.file.rows.filter((row) => row.kind !== "del" && row.kind !== "hunk" && row.new >= from && row.new <= t.row.new).map((row) => row.text);
+    const typed = this.draft.value().trimEnd();
+    this.draft.set_value(`${typed ? `${typed}\n\n` : ""}\`\`\`suggestion:-${t.row.new - from}+0\n${lines.join("\n")}\n\`\`\``);
+    cx.timer.after(0, () => this.draft.focus());
+    cx.notify();
   }
 
   threadView(t, d, x) {
     const notes = humanNotes(x);
     const first = notes[0];
     const pos = first.position;
-    const resolved = first.resolvable && x.notes.every((n) => !n.resolvable || n.resolved);
+    const resolved = isResolved(x);
+    const canEdit = Boolean(this.draftable());
     const fresh = notes.some((n) => this.isFresh(n));
     return v_flex().id(`th-${x.id}`).gap(10).p(12).rounded(8).border_1().border_color(fresh ? t.accent : t.border).bg(t.surface)
       .when(resolved, (el) => el.opacity(0.6))
       .when(Boolean(pos), (el) => el.child(h_flex().id(`th-pos-${x.id}`).gap(8).items_center().text_size(11).text_color(t.accent).cursor_pointer()
         .on_mouse_down("left", stop).on_click((_e, cx) => this.showPosition(d, pos, cx))
         .child(div().font_family(MONO).child(`${pos?.new_path ?? pos?.old_path}:${pos?.new_line ?? pos?.old_line}`))))
-      .children(notes.map((n) => this.noteView(t, n, `n-${n.id}`)))
+      .children(notes.map((n) => this.noteView(t, n, `n-${n.id}`, x)))
       .child(h_flex().gap(6).items_center()
         .when(resolved, (el) => el.child(this.chip(t, "resolved", t.done)))
         .child(div().flex_1())
+        .when(canEdit && Boolean(pos?.new_line) && !resolved && notes.some((n) => SUGGESTION.test(n.body ?? "")), (el) => {
+          const n = notes.find((y) => SUGGESTION.test(y.body ?? ""));
+          return el.child(this.button(t, `th-apply-${x.id}`, this.applying === n.id ? "Applying…" : "Apply suggestion", (cx) => this.applySuggestion(x, n, cx), false, !this.applying));
+        })
+        .when(canEdit && Boolean(first.resolvable), (el) => el.child(this.button(t, `th-resolve-${x.id}`, resolved ? "Reopen" : "Resolve", (cx) => this.toggleResolve(x, cx))))
         .when(this.local, (el) => el.child(this.button(t, `th-claude-${x.id}`, `→ ${this.agentName()}`, (cx) => this.sendThreads([x], cx), false, !this.sending)))
         .child(this.button(t, `th-reply-${x.id}`, "Reply / ask", (cx) => this.aim({ kind: "reply", discussionId: x.id, who: who(first.author) }, cx))));
   }
@@ -2927,7 +3357,9 @@ export default class GitlabReview extends View {
           .on_mouse_down("left", stop).on_click((_e, cx) => { this.file = n; this.jump = null; this.cursor = null; this.area = "files"; this.handle.focus(); cx.notify(); })
           .child(div().w(12).flex_none().text_size(11).font_family(MONO)
             .text_color(f.new_file ? t.done : f.deleted_file ? t.blocked : t.dim).child(fileMark(f)))
-          .child(div().flex_none().text_size(12).child(parts.pop()))
+          .child(div().id(`fv-${n}`).w(14).flex_none().text_size(11).text_color(this.isViewed(d, f) ? t.done : t.border).cursor_pointer().hover((s) => s.text_color(t.accent))
+            .on_mouse_down("left", stop).on_click((_e, cx) => this.toggleViewed(d, f, cx)).child(this.isViewed(d, f) ? "☑" : "☐"))
+          .child(div().flex_none().text_size(12).when(this.isViewed(d, f), (el) => el.text_color(t.dim)).child(parts.pop()))
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
           .when(this.local && Boolean(f.state), (el) => el.children(FILE_STATE.filter(([key]) => f.state[key])
             .map(([, label, color]) => div().flex_none().text_size(10.5).text_color(t[color]).child(label))))
@@ -3078,6 +3510,7 @@ export default class GitlabReview extends View {
       .child(div().id("c-draft").w_full().min_w(0).rounded(8).border_1().border_color(this.composing ? t.accent : t.border).bg(t.background)
         .on_mouse_down("left", stop).child(Textarea.new(this.draft).w_full()))
       .child(h_flex().gap(8).items_center().justify_end()
+        .when(this.target.kind === "line" && Boolean(this.target.row?.new) && Boolean(this.draftable()), (el) => el.child(this.button(t, "c-suggest", "Suggest a change", (cx) => this.suggestLines(cx))))
         .when(!this.local, (el) => el.child(this.button(t, "c-ask", `Ask ${this.agentName()}  ⌥↵`, (cx) => this.ask(cx), false, !empty)))
         .when(!this.local, (el) => el.child(this.button(t, "c-post", "Post now", (cx) => this.post(cx), false, !empty && !this.sending)))
         .when(this.closable()?.state === "opened", (el) => {
