@@ -41,6 +41,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl-w`, middle click on a tab | close the tab (a tab with unsaved changes asks for a second one) |
 | `ctrl-d` | delete the line (every line the selection touches) |
 | `ctrl-x` | with nothing selected, cut the line (to the clipboard); with a selection it cuts that, as usual |
+| `ctrl-c`, `ctrl-v` | copy the selection, paste (as `cmd-c`, `cmd-v` on macOS) |
 | `alt-up`, `alt-down` | move the line, or the selected lines, up or down |
 | `ctrl-shift-d` | duplicate the line, or the selected lines, below |
 | `f12`, `cmd-click` | go to definition |
@@ -49,7 +50,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl-=`, `ctrl-+` | go forward again |
 | `ctrl-alt-down`, `ctrl-alt-up` | next, previous change in the file |
 | `ctrl-alt-m` | show or hide the MR comments in the code (`ctrl-k` on one replies) |
-| `ctrl-alt-r`, `ctrl-alt-h` | resolve or reopen, hide or show the MR thread under the cursor (resolved ones start hidden) |
+| `ctrl-alt-r`, `ctrl-alt-f` | resolve or reopen, hide or show the MR thread under the cursor (resolved ones start hidden) |
 | `ctrl-alt-right`, `ctrl-alt-left` | next, previous tab |
 | `ctrl-/` | show the shortcuts |
 
@@ -67,6 +68,7 @@ The line keys work in the editor only: with the keyboard in another field (the f
 | `agentName` | `"Claude"` | the name shown on messages |
 | `keys` | `{}` | `{ "<id>": "<key>" }`, the ids above (`files`, `search`, `find`, `sidebar`, `changes`, `preview`, `comment`, `send`, `publish`, `save`, `close`, `definition`, `references`, `back`, `forward`, `nextTab`, `previousTab`, `deleteLine`, `cutLine`, `moveLineUp`, `moveLineDown`, `duplicateLine`, `shortcuts`) |
 | `servers` | `{}` | language server commands, over the built-in ones, by name: `python`, `rust`, `go`, `opentofu`, `typescript`, `vue`, `bash`, `dockerfile`, `compose`, `postgres` |
+| `fixOnSave` | built in | after each save: `ruff check --fix` then `ruff format` on Python (the repository's `venv`/`.venv` ruff, else the one on the `PATH`), `eslint --fix` on Vue, JavaScript and TypeScript (the closest `node_modules/.bin/eslint`); the file reloads with the fixes, the first problem left shows in the footer. `false` turns it off, `{ "<extension>": false }` for one type, `{ "<extension>": [["cmd", "arg", "{file}"]] }` runs your commands instead, from the repository |
 
 ## Requirements
 

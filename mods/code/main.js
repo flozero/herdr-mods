@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, TextView, v_virtual_list } from "gpui-base";
-import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile, closeOverlay, run, watchFolder } from "herdr";
+import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile, closeOverlay, run, watchFolder, shared, setShared } from "herdr";
 import { launch, fileUri, uriPath } from "./lsp.js";
 import { dockerLanguage } from "./docker.js";
 import { plainCompletion } from "./snippet.js";
@@ -23,6 +23,7 @@ const SYMBOL_KINDS = ["", "file", "module", "namespace", "package", "class", "me
 const MOD_DIR = () => `${appHome()}/mods/code`;
 const CACHE_DIR = () => `${home()}/.cache/herdr-code`;
 const COMMENTS_FILE = () => `${CACHE_DIR()}/comments.json`;
+const COMMENTS_KEY = "code.comments";
 const readComments = async () => {
   try { return JSON.parse((await readTextFile(COMMENTS_FILE())) ?? "{}") ?? {}; } catch { return {}; }
 };
@@ -31,6 +32,20 @@ const stop = (_e, cx) => cx.stop_propagation();
 // ctrl + the platform key (Super on Linux) held with a click: show where the symbol is used. Super alone moves windows on Omarchy,
 // ctrl alone is the editor's go to definition, so the two together are free.
 const usesChord = (modifiers) => Boolean(modifiers?.control && modifiers?.platform);
+
+const patchValue = (state, next) => {
+  const prev = state.value();
+  if (prev === next) return false;
+  let start = 0;
+  while (start < prev.length && start < next.length && prev[start] === next[start]) start += 1;
+  let tail = 0;
+  while (tail < prev.length - start && tail < next.length - start && prev[prev.length - 1 - tail] === next[next.length - 1 - tail]) tail += 1;
+  state.set_selected_range({ start, end: prev.length - tail });
+  state.replace(next.slice(start, next.length - tail));
+  if (state.value() === next) return false;
+  state.set_value(next);
+  return true;
+};
 
 const ACTIONS = [
   { id: "files", key: "ctrl-p", label: "Find a file", run: (view) => view.focusFinder() },
@@ -45,7 +60,9 @@ const ACTIONS = [
   { id: "close", key: "ctrl-w", label: "Close the tab", run: (view) => view.current && view.closeTab(view.current.path) },
   // Line edits, in the editor only. They answer false when the key is not theirs (the keyboard is in another field, or a cut has a selection).
   { id: "deleteLine", key: "ctrl-d", label: "Delete the line", run: (view, cx) => view.editLines(deleteLines, cx) },
-  { id: "cutLine", key: "ctrl-x", aliases: ["cmd-x"], label: "Cut the line (when nothing is selected)", run: (view, cx) => view.editLines(cutLines, cx) },
+  { id: "cutLine", key: "ctrl-x", aliases: ["cmd-x"], label: "Cut the selection, or the line when nothing is selected", run: (view, cx) => view.editLines(cutLines, cx) !== false || view.clipboard("cut", cx) },
+  { id: "copy", key: "ctrl-c", label: "Copy the selection", run: (view, cx) => view.clipboard("copy", cx) },
+  { id: "paste", key: "ctrl-v", label: "Paste", run: (view, cx) => view.clipboard("paste", cx) },
   { id: "moveLineUp", key: "alt-up", label: "Move the line up", run: (view, cx) => view.editLines(moveLines(-1), cx) },
   { id: "moveLineDown", key: "alt-down", label: "Move the line down", run: (view, cx) => view.editLines(moveLines(1), cx) },
   { id: "duplicateLine", key: "ctrl-shift-d", label: "Duplicate the line", run: (view, cx) => view.editLines(duplicateLines, cx) },
@@ -56,7 +73,7 @@ const ACTIONS = [
   { id: "forward", key: "ctrl-=", aliases: ["ctrl-+", "ctrl-shift-="], label: "Go forward", run: (view) => view.goForward() },
   { id: "threads", key: "ctrl-alt-m", label: "Show or hide the MR comments in the code", run: (view) => view.toggleThreads() },
   { id: "resolveThread", key: "ctrl-alt-r", label: "Resolve or reopen the MR thread under the cursor", run: (view) => view.resolveAtCursor() },
-  { id: "foldThread", key: "ctrl-alt-h", label: "Hide or show the MR thread under the cursor", run: (view) => view.foldAtCursor() },
+  { id: "foldThread", key: "ctrl-alt-f", label: "Hide or show the MR thread under the cursor", run: (view) => view.foldAtCursor() },
   { id: "nextChange", key: "ctrl-alt-down", label: "Next change", run: (view) => view.stepChange(1) },
   { id: "previousChange", key: "ctrl-alt-up", label: "Previous change", run: (view) => view.stepChange(-1) },
   { id: "nextTab", key: "ctrl-alt-right", label: "Next tab", run: (view) => view.cycleTab(1) },
@@ -261,7 +278,9 @@ const REFERENCE_COLOR = "#eab30826";
 const PEEK_BG = "#ef444412";
 const DIFF_DELETED = "#ef44441a";
 const DELETED_MARK = "\u2212 ";
-const LIVE_DIFF_DELAY = 120;
+const LIVE_DIFF_DELAY = 300;
+const CHANGE_DELAY = 150;
+const DIFF_SYNC_DELAY = 100;
 const DIFF_ADDED = "#22c55e12";
 const COMMIT_ROWS = 20000;
 const GRAPH_ROW = 22;
@@ -377,6 +396,7 @@ const positionOf = (text, offset) => {
 };
 
 const basename = (path) => path.slice(path.lastIndexOf("/") + 1);
+const dirname = (path) => path.slice(0, Math.max(path.lastIndexOf("/"), 0)) || "/";
 
 const OWN_ICON = (name) => `mods/code/icons/${name}.svg`;
 const APP_ICON = (name) => `icons/${name}.svg`;
@@ -522,6 +542,7 @@ export default class Code extends View {
     this.changedPaths = new Map();
     this.changesLoading = false;
     this.comments = [];
+    this.instance = `${Date.now()}-${Math.random()}`;
     this.threads = [];
     this.threadsShown = true;
     this.foldToggled = new Set();
@@ -1054,7 +1075,12 @@ export default class Code extends View {
       return null;
     }
     const fileRows = this.diffRows(document, file);
-    document.state.set_highlights("changes", changeHighlights(fileRows));
+    const changes = changeHighlights(fileRows);
+    const changesKey = JSON.stringify(changes);
+    if (document.changesKey !== changesKey) {
+      document.changesKey = changesKey;
+      document.state.set_highlights("changes", changes);
+    }
     const lines = document.state.value().split("\n");
     const deleted = new Map();
     const added = new Set();
@@ -1107,7 +1133,7 @@ export default class Code extends View {
     if (!document.diff) {
       const state = EditorState.new({ language: syntaxOf(basename(document.path), extensionOf(document.path), document.language), value, font_family: MONO, folding: false });
       document.diff = { state, value, deleted: out.filter(isVirtual) };
-      state.on("change", () => this.syncFromDiff(document));
+      state.on("change", () => this.queueDiffSync(document));
       this.trackTyping(document, state);
       this.applyDiffLsp(document);
     } else if (document.diff.state.value() !== value) {
@@ -1115,17 +1141,21 @@ export default class Code extends View {
       document.diff.value = value;
       document.diff.deleted = out.filter(isVirtual);
       document.diff.syncing = true;
-      document.diff.state.set_value(value);
+      if (patchValue(document.diff.state, value)) document.diff.labelKey = document.diff.highlightKey = undefined;
       document.diff.syncing = false;
       this.selectReal(document, range);
     }
     document.diff.kinds = kinds;
     document.diff.notes = notes;
     this.labelDiff(document);
-    document.diff.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" ? [] : [{
-      range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
-      color: kind === "del" ? DIFF_DELETED : kind === "note" ? NOTE_BG : DIFF_ADDED,
-    }])));
+    const highlightKey = kinds.join("");
+    if (document.diff.highlightKey !== highlightKey) {
+      document.diff.highlightKey = highlightKey;
+      document.diff.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" ? [] : [{
+        range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
+        color: kind === "del" ? DIFF_DELETED : kind === "note" ? NOTE_BG : DIFF_ADDED,
+      }])));
+    }
     return document.diff;
   }
 
@@ -1148,6 +1178,21 @@ export default class Code extends View {
     this.redraw();
   }
 
+  queueDiffSync(document) {
+    const diff = document.diff;
+    if (!diff || diff.syncing) return;
+    const seq = (diff.syncSeq ?? 0) + 1;
+    diff.syncSeq = seq;
+    diff.pendingSync = true;
+    this.cx.timer.after(DIFF_SYNC_DELAY, () => { if (diff.syncSeq === seq) this.flushDiffSync(document); });
+  }
+
+  flushDiffSync(document) {
+    if (!document.diff?.pendingSync) return;
+    document.diff.pendingSync = false;
+    this.syncFromDiff(document);
+  }
+
   syncFromDiff(document) {
     const diff = document.diff;
     if (diff.syncing) return;
@@ -1160,6 +1205,7 @@ export default class Code extends View {
         const at = Math.min(diff.state.selected_range().start, diff.value.length);
         const cursor = Math.max(0, diff.value.lastIndexOf("\n", Math.max(at - 1, 0)) + 1);
         diff.state.set_value(diff.value);
+        diff.labelKey = diff.highlightKey = undefined;
         diff.state.set_selected_range({ start: cursor, end: cursor });
         diff.reverting = false;
         this.message = "Deleted lines and comments can't be edited";
@@ -1171,7 +1217,7 @@ export default class Code extends View {
     const real = lines.filter((line) => !isVirtual(line)).join("\n");
     if (real !== document.state.value()) {
       document.syncing = true;
-      document.state.set_value(real);
+      patchValue(document.state, real);
       document.syncing = false;
       this.liveDiff(document);
     }
@@ -1179,10 +1225,14 @@ export default class Code extends View {
   }
 
   labelDiff(document) {
-    let line = 0;
     const lines = document.diff.state.value().split("\n");
+    const locked = lines.flatMap((text, i) => (isVirtual(text) ? [i] : []));
+    const key = `${lines.length}:${locked.join(",")}`;
+    if (document.diff.labelKey === key) return;
+    document.diff.labelKey = key;
+    let line = 0;
     document.diff.state.set_line_labels(lines.map((text) => (isVirtual(text) ? "" : String(++line))));
-    document.diff.state.set_locked_lines(lines.flatMap((text, i) => (isVirtual(text) ? [i] : [])));
+    document.diff.state.set_locked_lines(locked);
   }
 
   applyDiffLsp(document) {
@@ -1418,8 +1468,9 @@ export default class Code extends View {
     if (this.composer?.reply) return this.sendReply();
     const note = this.commentInput.value().trim();
     if (!this.composer || !note) return;
-    this.comments.push({ id: `${Date.now()}-${this.comments.length}`, ...this.composer, note });
-    this.saveComments();
+    const added = { id: `${Date.now()}-${this.comments.length}`, ...this.composer, note };
+    this.comments.push(added);
+    this.saveComments({ add: [added] });
     this.composer = null;
     for (const document of this.documents.values()) this.paintComments(document);
     this.focusActive(this.current);
@@ -1432,7 +1483,7 @@ export default class Code extends View {
 
   removeComment(id) {
     this.comments = this.comments.filter((comment) => comment.id !== id);
-    this.saveComments();
+    this.saveComments({ remove: [id] });
     for (const document of this.documents.values()) this.paintComments(document);
     this.redraw();
   }
@@ -1476,7 +1527,7 @@ export default class Code extends View {
     try {
       const { inline, general } = await publishReview(this.root, review, sent, this.changes?.files ?? []);
       this.comments = this.comments.filter((comment) => !sent.includes(comment));
-      this.saveComments();
+      this.saveComments({ remove: sent.map((comment) => comment.id) });
       for (const document of this.documents.values()) this.paintComments(document);
       this.message = `Published on ${review.label} ${review.name}: ${inline} on their lines${general ? `, ${general} in the review's comment (outside the diff)` : ""}`;
     } catch (error) {
@@ -1500,7 +1551,7 @@ export default class Code extends View {
       const shown = await this.agent.send(reviewPrompt({ branch: this.changes?.branch ?? "HEAD", base: this.changes?.base }, sent));
       if (here) run("pane.focus", { pane: here });
       this.comments = this.comments.filter((comment) => !sent.includes(comment));
-      this.saveComments();
+      this.saveComments({ remove: sent.map((comment) => comment.id) });
       for (const document of this.documents.values()) this.paintComments(document);
       const count = `${sent.length} comment${sent.length > 1 ? "s" : ""}`;
       this.message = shown ? `Sent ${count}: ${this.agentName} answers on the right` : `Sent ${count}: ${this.agentName} is starting in the background`;
@@ -1510,19 +1561,37 @@ export default class Code extends View {
     this.redraw();
   }
 
-  saveComments() {
-    const root = this.root, comments = this.comments;
+  saveComments({ add = [], remove = [] }) {
+    const root = this.root;
     if (!root) return;
     const write = (this.savingComments ?? Promise.resolve()).then(async () => {
       await exec("mkdir", ["-p", CACHE_DIR()]);
       const all = await readComments();
+      const kept = (Array.isArray(all[root]) ? all[root] : []).filter((comment) => !remove.includes(comment.id) && !add.some((a) => a.id === comment.id));
+      const comments = [...kept, ...add];
       if (comments.length) all[root] = comments; else delete all[root];
       await writeTextFile(COMMENTS_FILE(), JSON.stringify(all));
+      setShared(COMMENTS_KEY, { ...(shared(COMMENTS_KEY) ?? {}), [root]: { at: Date.now(), by: this.instance } });
     });
     this.savingComments = write.catch((error) => {
       this.message = `Couldn't save the comments: ${error?.message ?? error}`;
       this.redraw();
     });
+  }
+
+  followComments() {
+    const change = shared(COMMENTS_KEY)?.[this.root];
+    if (!change || change.by === this.instance || change.at === this.commentsSeen) return;
+    this.commentsSeen = change.at;
+    this.cx.timer.after(0, () => this.reloadComments());
+  }
+
+  async reloadComments() {
+    await this.savingComments;
+    const saved = (await readComments())[this.root];
+    this.comments = Array.isArray(saved) ? saved : [];
+    for (const document of this.documents.values()) this.paintComments(document);
+    this.redraw();
   }
 
   async loadRoot(folder) {
@@ -1688,6 +1757,7 @@ export default class Code extends View {
     this.back = this.back.filter((entry) => entry.path !== path);
     this.forward = this.forward.filter((entry) => entry.path !== path);
     this.documents.delete(path);
+    this.flushChange(document);
     this.notifyServers(document, "textDocument/didClose", { textDocument: { uri: document.uri } });
     if (this.current === document) {
       const next = this.tabs[Math.min(index, this.tabs.length - 1)];
@@ -2000,6 +2070,7 @@ export default class Code extends View {
     this.redraw();
     const { document, renamer, position, name } = symbol;
     try {
+      this.flushChange(document);
       const edit = await renamer.client.request("textDocument/rename", { textDocument: { uri: document.uri }, position, newName });
       const byPath = workspaceEdits(edit);
       if (!byPath.size) throw new Error(`${renamer.name} found nothing to rename`);
@@ -2182,18 +2253,32 @@ export default class Code extends View {
     state.on("change", () => {
       if (document.diff && !document.syncing) this.liveDiff(document);
       document.version += 1;
+      const wasDirty = document.dirty;
       document.dirty = state.value() !== document.saved;
       document.closeArmed = false;
-      this.notifyServers(document, "textDocument/didChange", {
-        textDocument: { uri: document.uri, version: document.version },
-        contentChanges: [{ text: state.value() }],
-      });
-      this.redraw();
+      this.queueChange(document);
+      if (document.dirty !== wasDirty || document.preview) this.redraw();
     });
     document.servers = language ? this.attach(document) : Promise.resolve([]);
     this.paintChanges(document);
     this.paintComments(document);
     return document;
+  }
+
+  queueChange(document) {
+    const version = document.version;
+    document.pendingChange = version;
+    this.cx.timer.after(CHANGE_DELAY, () => { if (document.pendingChange === version) this.flushChange(document); });
+  }
+
+  flushChange(document) {
+    this.flushDiffSync(document);
+    if (document.pendingChange === undefined) return;
+    document.pendingChange = undefined;
+    this.notifyServers(document, "textDocument/didChange", {
+      textDocument: { uri: document.uri, version: document.version },
+      contentChanges: [{ text: document.state.value() }],
+    });
   }
 
   notifyServers(document, method, params) {
@@ -2209,7 +2294,10 @@ export default class Code extends View {
         textDocument: { uri: document.uri, languageId: document.language.id, version: document.version, text: document.state.value() },
       });
     }
-    const at = (request) => ({ textDocument: { uri: document.uri }, position: request.position });
+    const at = (request) => {
+      this.flushChange(document);
+      return { textDocument: { uri: document.uri }, position: request.position };
+    };
     const able = (capability) => servers.filter((server) => server.capabilities[capability]);
     const firstAnswer = (capability, method) => able(capability).length
       ? async (request) => {
@@ -2383,19 +2471,62 @@ export default class Code extends View {
 
   async saveDocument(document) {
     if (!document) return;
+    this.flushDiffSync(document);
     const text = document.state.value();
     if (text === document.saved) return;
     try {
       await writeTextFile(document.path, text, document.saved);
       document.saved = text;
       document.dirty = false;
+      this.flushChange(document);
       this.notifyServers(document, "textDocument/didSave", { textDocument: { uri: document.uri }, text });
       this.message = `Saved ${this.relative(document.path)}`;
+      await this.fixOnSave(document);
       this.loadChanges();
     } catch (error) {
       this.message = `Not saved: ${error?.message ?? error}`;
     }
     this.redraw();
+  }
+
+  async fixers(path) {
+    const extension = extensionOf(path);
+    const configured = this.config.fixOnSave?.[extension];
+    if (configured === false || this.config.fixOnSave === false) return [];
+    if (Array.isArray(configured)) return configured.map((command) => ({ command: command.map((arg) => arg.replaceAll("{file}", path)), cwd: this.root }));
+    const runnable = async (file) => (await exec("test", ["-x", file])).code === 0;
+    if (extension === "py" || extension === "pyi") {
+      const venv = await this.findVenv();
+      const ruff = venv && (await runnable(`${venv}/bin/ruff`)) ? `${venv}/bin/ruff` : (await exec("sh", ["-c", "command -v ruff"])).stdout.trim();
+      return ruff ? [{ command: [ruff, "check", "--fix", "--quiet", path], cwd: this.root }, { command: [ruff, "format", "--quiet", path], cwd: this.root }] : [];
+    }
+    if (["vue", "js", "jsx", "ts", "tsx", "mjs", "cjs"].includes(extension)) {
+      for (let folder = dirname(path); folder.startsWith(this.root); folder = dirname(folder)) {
+        if (await runnable(`${folder}/node_modules/.bin/eslint`)) return [{ command: [`${folder}/node_modules/.bin/eslint`, "--fix", path], cwd: folder }];
+        if (folder === this.root) break;
+      }
+    }
+    return [];
+  }
+
+  async fixOnSave(document) {
+    const steps = await this.fixers(document.path);
+    if (!steps.length) return;
+    const problems = [];
+    for (const { command, cwd } of steps) {
+      const r = await exec(command[0], command.slice(1), { cwd });
+      const output = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim();
+      if (r.code !== 0 && output) problems.push(`${basename(command[0])}: ${output.split("\n")[0]}`);
+    }
+    const fixed = await readTextFile(document.path);
+    if (typeof fixed === "string" && fixed !== document.saved && this.documents.get(document.path) === document) {
+      const selection = document.state.selected_range();
+      document.saved = fixed;
+      patchValue(document.state, fixed);
+      const end = Math.min(selection.end, fixed.length);
+      document.state.set_selected_range({ start: Math.min(selection.start, end), end });
+    }
+    if (problems.length) this.message = `Saved ${this.relative(document.path)} · ${problems[0]}`;
   }
 
   // The editor (the file's, or its diff) that has the keyboard, so a line edit never lands in another field.
@@ -2424,6 +2555,28 @@ export default class Code extends View {
     return true;
   }
 
+  clipboard(kind, cx) {
+    const { document, state } = this.typing ?? {};
+    if (!document || this.documents.get(document.path) !== document) return false;
+    const text = state.value();
+    const { start, end } = state.selected_range();
+    if (kind === "copy") {
+      if (start === end) return false;
+      cx.write_to_clipboard(text.slice(start, end));
+      return true;
+    }
+    const pasted = kind === "paste" ? cx.read_from_clipboard() : "";
+    if (pasted === undefined || (kind === "cut" && start === end)) return false;
+    if (state === document.diff?.state && text.slice(text.lastIndexOf("\n", start - 1) + 1, end).split("\n").some(isVirtual)) {
+      this.message = "Deleted lines and comments can't be edited";
+      this.redraw();
+      return true;
+    }
+    if (kind === "cut") cx.write_to_clipboard(text.slice(start, end));
+    state.replace(pasted);
+    return true;
+  }
+
   onKey(e, cx) {
     const key = e.keystroke;
     const action = this.keymap.get(key);
@@ -2443,6 +2596,7 @@ export default class Code extends View {
   }
 
   render() {
+    this.followComments();
     const t = theme();
     return v_flex().id("code-root").relative().size_full().min_h(0).bg(t.background).text_size(13).text_color(t.foreground)
       .track_focus(this.handle).on_key_down((e, cx) => this.onKey(e, cx))
