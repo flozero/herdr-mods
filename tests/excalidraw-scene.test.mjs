@@ -53,12 +53,12 @@ test("a shape sized from its label is no wider than the text needs", () => {
 
 test("paths are drawn at the canvas zoom only: Herdr zooms a path's lengths itself", () => {
   const src = readFileSync(join(mod, "main.js"), "utf8");
-  assert.match(src, /drawScale\(\) \{\s*return this\.vz;\s*\}/);
+  assert.match(src, /pathScale\(\) \{\s*return this\.vz;\s*\}/);
   // The scale handed to buildLayers (the paths) must not carry Herdr's zoom, or shapes end up
   // zoom times larger than the text on them.
   const body = (name) => src.slice(src.indexOf(`  ${name}(`), src.indexOf("\n  }\n", src.indexOf(`  ${name}(`)));
   for (const fn of ["rebuild", "renderLive"]) {
-    assert.match(body(fn), /this\.drawScale\(\)/, `${fn} draws with drawScale()`);
+    assert.match(body(fn), /this\.pathScale\(\)/, `${fn} draws with pathScale()`);
     assert.doesNotMatch(body(fn), /this\.scale\(\)/, `${fn} does not use the pointer scale for paths`);
   }
 });
