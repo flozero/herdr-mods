@@ -1,0 +1,107 @@
+diff -ruN a/layouts/main.json b/layouts/main.json
+--- a/layouts/main.json	2026-11-24 09:46:07
++++ b/layouts/main.json	2026-11-24 09:46:07
+@@ -2,6 +2,7 @@
+   "id": "root",
+   "type": "row",
+   "titlebar": "none",
++  "terminal_menu": "my-menu",
+   "traffic_lights": [
+     12,
+     16
+diff -ruN a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-24 09:46:07
++++ b/mods/menu/main.js	2026-11-24 09:46:07
+@@ -13,6 +13,13 @@
+   return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+ }
+ 
++function here() {
++  const shown = spaces().find((s) => s.active);
++  if (!shown) return {};
++  const folder = panes().find((p) => p.focused && p.cwd)?.cwd || place(shown);
++  return folder ? { folder, machine: shown.machine ?? "" } : {};
++}
++
+ // A space's checkout: "main" (a repo's own), "linked" (a worktree), or null.
+ async function checkout(folder, on) {
+   const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on });
+@@ -70,7 +77,7 @@
+       ];
+     default:
+       return [
+-        ["New space", "space.new", {}],
++        ["New space", "space.new", here()],
+         ["Keybinds", "app.help", {}],
+         ["Theme: graphite", "app.theme", { name: "graphite" }],
+         ["Theme: ink", "app.theme", { name: "ink" }],
+diff -ruN a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-24 09:46:07
++++ b/mods/new-menu/main.js	2026-11-24 09:46:07
+@@ -5,6 +5,15 @@
+ // The last agents each machine reported, shown at once while knownAgents() checks again.
+ const KNOWN = "new-menu.agents";
+ 
++function here() {
++  const shown = spaces().find((s) => s.active);
++  if (!shown) return {};
++  const ps = panes();
++  const tabs = new Set((shown.tabs ?? []).map((c) => c.id));
++  const folder = ps.find((p) => p.focused && p.cwd)?.cwd || ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || shown.folder;
++  return folder ? { folder, machine: shown.machine ?? "" } : {};
++}
++
+ function shortcut(name) {
+   const k = keys().find(b => b.section === "global" && b.action === name);
+   if (!k?.keys.trim()) return "";
+@@ -66,7 +75,7 @@
+           () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? String(i + 1) : "") : "not installed", a.installed)))
+         .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
+       .child(div().h(1).mx(4).my(5).bg(t.border))
+-      .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), shortcut("space.new")))
++      .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new", here()), shortcut("space.new")))
+       .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 460, height: 400, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
+       .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
+   }
+diff -ruN a/mods/spaces/main.js b/mods/spaces/main.js
+--- a/mods/spaces/main.js	2026-11-24 09:46:07
++++ b/mods/spaces/main.js	2026-11-24 09:46:07
+@@ -25,6 +25,14 @@
+   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
+   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+ }
++
++function here(machine) {
++  const shown = spaces().find((s) => s.active);
++  if (!shown || (machine !== undefined && (shown.machine ?? null) !== machine)) return {};
++  const ps = panes();
++  const folder = ps.find((p) => p.focused && p.cwd)?.cwd || place(shown, ps);
++  return folder ? { folder, machine: shown.machine ?? "" } : {};
++}
+ const rowHeight = ({ tree }) => (tree ? 28 : 30);
+ const RAIL_CELL = 32;
+ // A space's name and its git tail never shrink below this, so a short one ("api")
+@@ -405,12 +413,12 @@
+               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
+               .child(repair?.busy ? "Connecting…" : "Connect"))))
+           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
+-            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
++            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "", ...here(m ?? null) }); }).child("+")))
+           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
+           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
+       const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().rounded(7)
+         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+-        .on_click(() => run("space.new", { machine: m ?? "" }))
++        .on_click(() => run("space.new", { machine: m ?? "", ...here(m ?? null) }))
+         .when(collapsed, el => el.w(RAIL_CELL).rounded(6).justify_center().tooltip(`New space on ${m ?? "this computer"}`)
+           .child(h_flex().size(18).rounded(5).border_1().border_color(t.dim).items_center().justify_center()
+             .child(svg("mods/workspace-chrome/plus.svg").size(10))))
+@@ -563,7 +571,7 @@
+         .when(collapsed, el => el.pl(0).pr(0).justify_center())
+         .when(!collapsed, el => el.child("Spaces"))
+         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
+-          .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
++          .on_click(() => run("space.new", here())).child(svg("mods/workspace-chrome/plus.svg").size(14))))
+       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
+         // A block above (another mod's) growing, or the window resizing, shrinks this list and can push the active space out.
+         .on_size_change((_size, cx) => { if (this.activeAt >= 0) { this.scroll.scroll_to_item(this.activeAt); cx.notify(); } })

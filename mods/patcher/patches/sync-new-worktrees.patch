@@ -1,6 +1,6 @@
-diff -ru a/layouts/main.json b/layouts/main.json
---- a/layouts/main.json	2026-11-19 13:03:09
-+++ b/layouts/main.json	2026-11-19 13:03:09
+diff -ruN a/layouts/main.json b/layouts/main.json
+--- a/layouts/main.json	2026-11-24 09:45:07
++++ b/layouts/main.json	2026-11-24 09:45:20
 @@ -16,7 +16,8 @@
      "color": "border"
    },
@@ -11,9 +11,9 @@ diff -ru a/layouts/main.json b/layouts/main.json
    ],
    "children": [
      {
-diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-19 13:03:09
-+++ b/mods/worktree/main.js	2026-11-19 13:03:09
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:45:07
++++ b/mods/worktree/main.js	2026-11-24 09:45:20
 @@ -122,6 +122,14 @@
    return { top: top.out, main, name, linked: main !== top.out };
  }
@@ -34,6 +34,6 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      this.error = "";
      cx.notify();
 +    if (!remove) claim(this.text.trim());
-     try { this.error = remove ? await this.remove() : await this.create(); }
+     try { this.error = remove ? await this.remove(cx) : await this.create(); }
      catch (error) { this.error = String(error); }
      this.busy = false;

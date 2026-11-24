@@ -1,16 +1,15 @@
-diff --git a/mods/worktree/main.js b/mods/worktree/main.js
-index daedd06..1a0ecc0 100644
---- a/mods/worktree/main.js
-+++ b/mods/worktree/main.js
-@@ -394,7 +394,6 @@ export default class Worktree extends View {
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:46:07
++++ b/mods/worktree/main.js	2026-11-24 09:46:32
+@@ -394,7 +394,6 @@
      this.busy = true;
      this.error = "";
      cx.notify();
 -    if (!remove) claim(this.text.trim());
-     try { this.error = remove ? await this.remove() : await this.create(cx); }
+     try { this.error = remove ? await this.remove(cx) : await this.create(cx); }
      catch (error) { this.error = String(error); }
      this.busy = false;
-@@ -404,10 +403,14 @@ export default class Worktree extends View {
+@@ -404,10 +403,14 @@
    }
  
    async create(cx) {

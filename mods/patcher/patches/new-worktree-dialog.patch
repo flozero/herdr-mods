@@ -1,6 +1,6 @@
-diff -ru a/mods/menu/main.js b/mods/menu/main.js
---- a/mods/menu/main.js	2026-11-19 13:05:20
-+++ b/mods/menu/main.js	2026-11-19 13:05:20
+diff -ruN a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-24 09:45:55
++++ b/mods/menu/main.js	2026-11-24 09:46:07
 @@ -113,7 +113,7 @@
      const it = items(props(), this.git)[i];
      if (!it) return;
@@ -10,9 +10,9 @@ diff -ru a/mods/menu/main.js b/mods/menu/main.js
      else run(it[1], it[2]);
    }
  
-diff -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
---- a/mods/new-menu/main.js	2026-11-19 13:05:20
-+++ b/mods/new-menu/main.js	2026-11-19 13:05:20
+diff -ruN a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-24 09:45:55
++++ b/mods/new-menu/main.js	2026-11-24 09:46:07
 @@ -67,7 +67,7 @@
          .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
        .child(div().h(1).mx(4).my(5).bg(t.border))
@@ -22,9 +22,9 @@ diff -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
        .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
    }
  }
-diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-19 13:05:20
-+++ b/mods/worktree/main.js	2026-11-19 13:05:20
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:45:55
++++ b/mods/worktree/main.js	2026-11-24 09:46:07
 @@ -78,6 +78,7 @@
      setup: [...command(mine.setup, "worktrees.setup"), ...command(here.setup, from("setup"))],
      teardown: [...command(here.teardown, from("teardown")), ...command(mine.teardown, "worktrees.teardown")],
@@ -160,8 +160,8 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      this.error = "";
      cx.notify();
      if (!remove) claim(this.text.trim());
--    try { this.error = remove ? await this.remove() : await this.create(); }
-+    try { this.error = remove ? await this.remove() : await this.create(cx); }
+-    try { this.error = remove ? await this.remove(cx) : await this.create(); }
++    try { this.error = remove ? await this.remove(cx) : await this.create(cx); }
      catch (error) { this.error = String(error); }
      this.busy = false;
      if (!this.error && this.branch) await this.deleteBranch();
@@ -192,7 +192,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      return "";
    }
  
-@@ -398,6 +483,13 @@
+@@ -402,6 +487,13 @@
  
    key(e, cx) {
      if (e.key === "escape") return this.close();
@@ -206,7 +206,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      if (this.opening) {
        const n = this.shown().length;
        if (e.key === "enter") this.open(this.shown()[this.at]);
-@@ -491,7 +583,7 @@
+@@ -495,7 +587,7 @@
              ? !r.linked
                ? "This is the repository's main checkout, not a worktree."
                : `Closes the space and deletes ${tilde(r.top, this.userHome)}. ${this.branch ? `Deletes branch ${this.branch.name} too.` : "The branch stays."}`
@@ -215,7 +215,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      const blocked = !r || (remove && !r.linked);
      const steps = this.worktrees?.[remove ? "teardown" : "setup"] ?? [];
      const runs = !r || blocked || !steps.length ? ""
-@@ -513,7 +605,7 @@
+@@ -517,7 +609,7 @@
        .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
        .when(remove && this.locked !== null, (el) => el.child(div().text_color(t.blocked).child(`It's locked${lockedBy(this.locked)}: removing it overrides the lock.`)))
        .when(!remove && !blocked, (el) =>
@@ -224,7 +224,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
            Input.new(this.input)
              .h(32)
              .px(10)
-@@ -523,7 +615,9 @@
+@@ -527,7 +619,9 @@
              .border_color(this.inputFocused ? t.accent : t.input)
              .bg(t.background)
              .text_color(t.foreground),

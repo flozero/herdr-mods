@@ -1,6 +1,6 @@
-diff -ru a/layouts/main.json b/layouts/main.json
---- a/layouts/main.json	2026-11-19 10:31:32
-+++ b/layouts/main.json	2026-11-19 10:31:32
+diff -ruN a/layouts/main.json b/layouts/main.json
+--- a/layouts/main.json	2026-11-24 09:45:07
++++ b/layouts/main.json	2026-11-24 09:45:07
 @@ -15,6 +15,9 @@
      "width": 1,
      "color": "border"
@@ -29,10 +29,10 @@ diff -ru a/layouts/main.json b/layouts/main.json
            }
          },
          {
-diff -ru a/mods/menu/main.js b/mods/menu/main.js
---- a/mods/menu/main.js	2026-11-09 09:13:53
-+++ b/mods/menu/main.js	2026-11-19 10:31:32
-@@ -112,7 +112,7 @@
+diff -ruN a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-24 09:45:07
++++ b/mods/menu/main.js	2026-11-24 09:45:07
+@@ -113,7 +113,7 @@
      const it = items(props(), this.git)[i];
      if (!it) return;
      closeOverlay(props()?.overlay);
@@ -41,9 +41,9 @@ diff -ru a/mods/menu/main.js b/mods/menu/main.js
      else run(it[1], it[2]);
    }
  
-diff -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
---- a/mods/new-menu/main.js	2026-11-10 14:32:31
-+++ b/mods/new-menu/main.js	2026-11-19 10:31:32
+diff -ruN a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-24 09:45:07
++++ b/mods/new-menu/main.js	2026-11-24 09:45:07
 @@ -67,7 +67,7 @@
          .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
        .child(div().h(1).mx(4).my(5).bg(t.border))
@@ -54,10 +54,10 @@ diff -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
 +      .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
    }
  }
-diff -ru a/mods/spaces/main.js b/mods/spaces/main.js
---- a/mods/spaces/main.js	2026-11-16 08:26:15
-+++ b/mods/spaces/main.js	2026-11-19 10:31:32
-@@ -287,7 +287,7 @@
+diff -ruN a/mods/spaces/main.js b/mods/spaces/main.js
+--- a/mods/spaces/main.js	2026-11-24 09:45:07
++++ b/mods/spaces/main.js	2026-11-24 09:45:07
+@@ -302,7 +302,7 @@
  
    menu(w) {
      // A popup is as tall as its items; height is only the most.
@@ -66,9 +66,9 @@ diff -ru a/mods/spaces/main.js b/mods/spaces/main.js
    }
  
    orderingDue(now) {
-diff -ru a/mods/tabs/main.js b/mods/tabs/main.js
---- a/mods/tabs/main.js	2026-11-16 08:26:15
-+++ b/mods/tabs/main.js	2026-11-19 10:31:32
+diff -ruN a/mods/tabs/main.js b/mods/tabs/main.js
+--- a/mods/tabs/main.js	2026-11-24 09:45:07
++++ b/mods/tabs/main.js	2026-11-24 09:45:07
 @@ -147,7 +147,7 @@
        .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
          .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })

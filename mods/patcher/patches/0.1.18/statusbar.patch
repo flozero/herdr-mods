@@ -1,0 +1,294 @@
+diff -ruN a/layouts/main.json b/layouts/main.json
+--- a/layouts/main.json	2026-11-24 09:46:32
++++ b/layouts/main.json	2026-11-24 09:46:32
+@@ -179,7 +179,7 @@
+             "px": 28
+           },
+           "content": {
+-            "mod": "workspace-status"
++            "mod": "my-workspace-status"
+           }
+         }
+       ]
+diff -ruN a/mods/workspace-status/context.js b/mods/workspace-status/context.js
+--- a/mods/workspace-status/context.js	1969-12-31 19:00:00
++++ b/mods/workspace-status/context.js	2026-11-24 09:46:32
+@@ -0,0 +1,111 @@
++import { exec, appHome, shared, setShared } from "herdr";
++
++export const KEY = "statusbar.context";
++const DAY = 24 * 60 * 60 * 1000;
++const REFRESH_AT = 60 * 1000;
++const MR_QUERY = `query($p: ID!, $b: String!) {
++  currentUser { username name id }
++  project(fullPath: $p) { mergeRequests(sourceBranches: [$b], state: opened, first: 1) { nodes {
++    iid title webUrl draft sourceBranch targetBranch diffHeadSha
++    headPipeline { status path }
++    resolvableDiscussionsCount resolvedDiscussionsCount
++    diffRefs { baseSha headSha startSha }
++  } } }
++}`;
++
++export function issueCandidates(branch) {
++  const out = [];
++  for (const m of String(branch ?? "").matchAll(/(?:^|[^A-Za-z0-9])([A-Za-z][A-Za-z0-9]*)-(\d+)(?![A-Za-z0-9])/g)) {
++    const id = `${m[1].toUpperCase()}-${m[2]}`;
++    if (!out.includes(id)) out.push(id);
++  }
++  return out.slice(0, 3);
++}
++
++export function forgeOf(url) {
++  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/.exec(String(url).trim());
++  return m ? { host: m[1], path: m[2] } : null;
++}
++
++const sameEntry = (a, b) => JSON.stringify({ ...a, fetchedAt: 0 }) === JSON.stringify({ ...b, fetchedAt: 0 });
++
++export function merged(all, root, entry, now) {
++  const kept = Object.fromEntries(Object.entries(all ?? {}).filter(([key, value]) => key !== root && now - (value?.fetchedAt ?? 0) < DAY));
++  return { ...kept, [root]: entry };
++}
++
++export function shouldPublish(previous, entry, now) {
++  return !previous || !sameEntry(previous, entry) || now - (previous.fetchedAt ?? 0) >= REFRESH_AT;
++}
++
++export function mrOf(node, host) {
++  if (!node) return null;
++  const status = node.headPipeline?.status ? node.headPipeline.status.toLowerCase() : null;
++  return {
++    iid: Number(node.iid),
++    title: node.title,
++    web_url: node.webUrl,
++    state: "opened",
++    draft: Boolean(node.draft),
++    source_branch: node.sourceBranch,
++    target_branch: node.targetBranch,
++    sha: node.diffHeadSha,
++    diff_refs: node.diffRefs ? { base_sha: node.diffRefs.baseSha, head_sha: node.diffRefs.headSha, start_sha: node.diffRefs.startSha } : null,
++    pipeline: status ? { status, web_url: `https://${host}${node.headPipeline.path}` } : null,
++    openThreads: Math.max(0, (node.resolvableDiscussionsCount ?? 0) - (node.resolvedDiscussionsCount ?? 0)),
++  };
++}
++
++async function gitlabPart(root, branch) {
++  const remote = await exec("git", ["-C", root, "remote", "get-url", "origin"]).catch(() => null);
++  const forge = remote?.code === 0 ? forgeOf(remote.stdout) : null;
++  if (!forge || forge.host.startsWith("github")) return null;
++  const r = await exec("glab", ["api", "graphql", "--hostname", forge.host, "-f", `query=${MR_QUERY}`, "-f", `p=${forge.path}`, "-f", `b=${branch}`], { cwd: root, timeout: 30000 }).catch(() => null);
++  if (!r || r.code !== 0) return undefined;
++  const data = JSON.parse(r.stdout).data;
++  const me = data?.currentUser;
++  return {
++    gitlab: { host: forge.host, project: forge.path, me: me ? { username: me.username, name: me.name, id: Number(String(me.id).split("/").pop()) } : null },
++    mr: mrOf(data?.project?.mergeRequests?.nodes?.[0], forge.host),
++  };
++}
++
++async function linearPart(branch) {
++  const ids = issueCandidates(branch);
++  if (!ids.length) return null;
++  const cli = `${appHome()}/mods/linear/cli/linear-me.mjs`;
++  const calls = JSON.stringify(ids.map((id) => ({ tool: "get_issue", args: { id } })));
++  const r = await exec("node", [cli, "batch", calls], { timeout: 60000 }).catch(() => null);
++  if (!r || r.code !== 0) return undefined;
++  let out = null;
++  try { out = JSON.parse(String(r.stdout).trim().split("\n").pop()); } catch {}
++  if (!out?.ok) return undefined;
++  const at = out.value.findIndex((x) => x.ok && x.value?.title);
++  if (at < 0) return null;
++  const issue = out.value[at].value;
++  return { id: ids[at], title: issue.title, state: issue.status ?? issue.state?.name ?? null, url: issue.url ?? null };
++}
++
++export async function fetchContext(root, branch, previous) {
++  const [gitlab, issue] = await Promise.all([gitlabPart(root, branch).catch(() => undefined), linearPart(branch).catch(() => undefined)]);
++  const keep = previous?.branch === branch ? previous : null;
++  return {
++    branch,
++    fetchedAt: Date.now(),
++    gitlab: gitlab === undefined ? keep?.gitlab ?? null : gitlab?.gitlab ?? null,
++    mr: gitlab === undefined ? keep?.mr ?? null : gitlab?.mr ?? null,
++    issue: issue === undefined ? keep?.issue ?? null : issue,
++  };
++}
++
++export function publish(root, entry) {
++  const all = shared(KEY) ?? {};
++  const now = Date.now();
++  if (!shouldPublish(all[root], entry, now)) return false;
++  setShared(KEY, merged(all, root, entry, now));
++  return true;
++}
++
++export function contextFor(root) {
++  return (shared(KEY) ?? {})[root] ?? null;
++}
+diff -ruN a/mods/workspace-status/main.js b/mods/workspace-status/main.js
+--- a/mods/workspace-status/main.js	2026-11-24 09:46:32
++++ b/mods/workspace-status/main.js	2026-11-24 09:46:32
+@@ -1,8 +1,135 @@
+ import { View, div, svg } from "gpui-kit";
+ import { h_flex } from "gpui-base";
+-import { spaces, agents, theme, run, window, keys } from "herdr";
++import { spaces, agents, theme, run, window, keys, exec, panes } from "herdr";
++import { contextFor, fetchContext, publish } from "./context.js";
+ 
++const TICK = 3000;
++const EVERY = 60000;
++const BUSY_EVERY = 15000;
++const base = (path) => String(path ?? "").split("/").pop() || "?";
++
+ export default class WorkspaceStatus extends View {
++  init(_props, cx) {
++    this.roots = new Map();
++    this.due = new Map();
++    this.entries = new Map();
++    this.ctx = null;
++    this.ctxRoot = null;
++    this.place = null;
++    this.watched = null;
++    this.nextAt = 0;
++    this.fetching = false;
++    cx.timer.every(TICK, (cx) => this.tick(cx));
++    cx.timer.after(0, (cx) => this.tick(cx));
++  }
++
++  async rootOf(folder) {
++    if (!this.roots.has(folder)) {
++      const r = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]).catch(() => null);
++      this.roots.set(folder, r?.code === 0 ? r.stdout.trim() : null);
++    }
++    return this.roots.get(folder);
++  }
++
++  async placeOf(folder) {
++    const root = await this.rootOf(folder);
++    if (!root) return null;
++    const r = await exec("git", ["-C", root, "branch", "--show-current"]).catch(() => null);
++    const branch = r?.code === 0 ? r.stdout.trim() : "";
++    return branch ? { root, branch } : null;
++  }
++
++  show(place, cx) {
++    const key = place ? `${place.root}\n${place.branch}` : null;
++    if (key === this.watched) return false;
++    this.watched = key;
++    this.place = place;
++    this.nextAt = key ? this.due.get(key) ?? 0 : 0;
++    if (place) {
++      const known = this.entries.get(key) ?? (contextFor(place.root)?.branch === place.branch ? contextFor(place.root) : null);
++      this.ctx = known;
++      this.ctxRoot = place.root;
++    } else {
++      this.ctx = null;
++      this.ctxRoot = null;
++    }
++    cx.notify();
++    return true;
++  }
++
++  tick(cx) {
++    if (this.ticking) return;
++    const space = spaces().find((s) => s.active);
++    if (!space || space.machine || !space.folder) {
++      this.show(null, cx);
++      return;
++    }
++    this.ticking = true;
++    cx.spawn(async (cx) => {
++      try {
++        const place = await this.placeOf(space.folder);
++        if (spaces().find((s) => s.active)?.id !== space.id) return;
++        this.show(place, cx);
++        if (place) this.refresh(place, cx);
++      } finally {
++        this.ticking = false;
++      }
++    });
++  }
++
++  refresh(place, cx) {
++    const key = `${place.root}\n${place.branch}`;
++    if (this.fetching || Date.now() < this.nextAt) return;
++    this.fetching = true;
++    cx.spawn(async (cx) => {
++      try {
++        const root = place.root;
++        const entry = await fetchContext(root, place.branch, this.entries.get(key) ?? contextFor(root));
++        this.entries.set(key, entry);
++        publish(root, entry);
++        const busy = entry.mr?.pipeline && ["running", "pending", "created", "preparing", "waiting_for_resource"].includes(entry.mr.pipeline.status);
++        this.due.set(key, Date.now() + (busy ? BUSY_EVERY : EVERY));
++        if (this.watched !== key) return;
++        this.ctx = entry;
++        this.ctxRoot = root;
++        this.nextAt = this.due.get(key);
++        cx.notify();
++      } finally {
++        this.fetching = false;
++      }
++    });
++  }
++
++  openTab(name, mod, props) {
++    for (const space of spaces()) {
++      const tab = space.tabs.find((candidate) => candidate.name === name && panes().some((pane) => pane.tab === candidate.id && pane.mod === mod));
++      if (tab) {
++        run("space.select", { id: space.id });
++        run("tab.select", { id: tab.id });
++        return;
++      }
++    }
++    run("tab.new", { name, mod, props });
++  }
++
++  openIssue(id) {
++    for (const space of spaces()) {
++      const tab = space.tabs.find((candidate) => panes().some((pane) => pane.tab === candidate.id && pane.mod === "linear"));
++      if (tab) {
++        run("space.select", { id: space.id });
++        run("tab.select", { id: tab.id });
++        run(`linear.open:${id}`);
++        return;
++      }
++    }
++    run("tab.new", { name: "Linear", mod: "linear", props: { open: id } });
++  }
++
++    link(t, id, content, onClick) {
++    return h_flex().id(id).gap(6).items_center().px(4).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
++      .on_click(() => onClick()).child(content);
++  }
++
+   // The palette key as actually bound, not a hardcoded one; without a
+   // binding the hint stays useful ("commands") instead of lying.
+   hint(t) {
+@@ -20,9 +147,25 @@
+     const list = agents();
+     const needs = list.filter(a => a.status === "blocked").length;
+     const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13)).child(text);
++    const ctx = this.ctx, root = this.ctxRoot, mr = ctx?.mr, issue = ctx?.issue;
++    const pipeColor = { success: t.done, failed: t.blocked, running: t.accent, pending: t.accent, canceled: t.dim };
++    const shown = this.place?.branch ?? space?.branch ?? "";
++    const branch = label("branch", shown);
+     return h_flex().size_full().px(14).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8).text_color(t.muted)
+       .child(label(space?.machine ? "server" : "monitor", space?.machine ?? "This computer"))
+-      .when(Boolean(space?.branch), el => el.child(label("branch", space.branch)))
++      .when(Boolean(shown), el => el.child(root
++        ? this.link(t, "sb-branch", branch, () => this.openTab(`Code · ${base(root)}`, "code", { root }))
++        : branch))
++      .when(Boolean(mr) && Boolean(root), el => el.child(this.link(t, "sb-mr", h_flex().gap(6).items_center()
++        .child(div().text_color(t.foreground).child(`!${mr.iid}`))
++        .when(mr.draft, el => el.child(div().child("draft")))
++        .when(Boolean(mr.pipeline), el => el.child(div().text_color(pipeColor[mr.pipeline.status] ?? t.dim).child(`● ${mr.pipeline.status}`)))
++        .when(mr.openThreads > 0, el => el.child(div().child(`${mr.openThreads} thread${mr.openThreads > 1 ? "s" : ""}`))),
++        () => this.openTab(`Review · ${base(root)}`, "gitlab-review", { cwd: root, local: true }))))
++      .when(Boolean(issue), el => el.child(this.link(t, "sb-issue", h_flex().gap(6).items_center()
++        .child(div().text_color(t.foreground).child(issue.id))
++        .when(Boolean(issue.state), el => el.child(div().child(issue.state))),
++        () => this.openIssue(issue.id))))
+       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} ${list.length === 1 ? "agent" : "agents"}`)
+         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} ${needs === 1 ? "needs" : "need"} you`))))
+       .child(div().flex_1())

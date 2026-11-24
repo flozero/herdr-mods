@@ -1,6 +1,6 @@
-diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-23 21:45:17.755481570 -0500
-+++ b/mods/worktree/main.js	2026-11-23 21:45:44.387920444 -0500
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:45:46
++++ b/mods/worktree/main.js	2026-11-24 09:45:55
 @@ -192,6 +192,20 @@
    return { mods, unpushed };
  }
@@ -38,12 +38,13 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
          }
          if (repo && this.opening) this.list = await checkouts(repo, this.on);
          this.repo = repo;
-@@ -349,8 +365,12 @@
+@@ -349,9 +365,12 @@
      if (!list.ok) return list.err || "git worktree list failed.";
      const checkout = list.out.split(/\n\n+/).map((record) => record.split("\n"))
        .find(([path]) => path === `worktree ${this.repo.top}`);
 -    const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
 -    if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
+-
 +    const locked = await lockOf(this.repo.top, this.on);
 +    if (locked !== null && !this.overridingLock) {
 +      this.locked = locked;
@@ -53,17 +54,17 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      const steps = this.skipTeardown ? [] : this.scripts("teardown");
      if (steps.length) {
        const branch = (await git(this.repo.top, ["branch", "--show-current"], this.on)).out;
-@@ -368,7 +388,8 @@
-     // A shell sitting in the folder can keep it busy on Windows.
-     if (windows) closeSpace();
+@@ -375,7 +394,8 @@
+       await cx.sleep(50);
+     }
      const force = this.dirty || mods.length > 0;
 -    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
 +    const forced = locked !== null ? ["--force", "--force"] : force ? ["--force"] : [];
 +    const r = await git(this.repo.main, ["worktree", "remove", ...forced, this.repo.top], this.on, 600_000);
      if (!r.ok) return r.err || "git worktree remove failed.";
-     if (!windows) closeSpace();
      return "";
-@@ -489,6 +510,7 @@
+   }
+@@ -495,6 +515,7 @@
        .when(Boolean(runs), (el) => el.child(div().text_size(12).text_color(t.dim).child(runs)))
        .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
        .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))

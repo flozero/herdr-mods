@@ -58,7 +58,7 @@ In `mods/worktree` → `my-worktree`:
 - `remove()`: `if (changed) return "It changed since this opened. Enter again removes it anyway.";`
   is followed by the `git worktree list` read and the refusal of a locked worktree
   (`if (lock) return lock === "locked" ? …;`). The teardown goes right after that, before the
-  `// Git on a remote Windows machine …` line, so before the space is closed.
+  `if (s?.id) {` block that closes the space (Herdr 0.1.18), so before the space is closed.
 - `render()`: the Remove text ending "The branch stays.", the New one starting
   "A new space on a checkout in ${tilde(this.root, this.userHome)}/${r.name}/.",
   `const blocked = …`, `.child(div().text_color(t.muted).child(detail))` and

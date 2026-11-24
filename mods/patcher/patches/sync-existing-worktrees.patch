@@ -1,6 +1,6 @@
-diff --color -ru a/mods/menu/main.js b/mods/menu/main.js
---- a/mods/menu/main.js	2026-11-19 14:42:24
-+++ b/mods/menu/main.js	2026-11-19 14:42:24
+diff -ruN a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-24 09:46:07
++++ b/mods/menu/main.js	2026-11-24 09:46:07
 @@ -5,7 +5,7 @@
  
  import { View, div, svg } from "gpui-kit";
@@ -36,9 +36,9 @@ diff --color -ru a/mods/menu/main.js b/mods/menu/main.js
      else run(it[1], it[2]);
    }
  
-diff --color -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
---- a/mods/new-menu/main.js	2026-11-19 14:42:24
-+++ b/mods/new-menu/main.js	2026-11-19 14:42:55
+diff -ruN a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-24 09:46:07
++++ b/mods/new-menu/main.js	2026-11-24 09:46:07
 @@ -59,7 +59,7 @@
      const space = spaces().find(s => s.active);
      const installed = this.agents.filter(a => a.installed);

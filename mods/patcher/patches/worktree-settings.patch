@@ -1,6 +1,6 @@
-diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-23 21:45:02.626491013 -0500
-+++ b/mods/worktree/main.js	2026-11-23 21:45:17.755481570 -0500
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:45:20
++++ b/mods/worktree/main.js	2026-11-24 09:45:46
 @@ -22,6 +22,88 @@
    if (!path.startsWith("/") && !/^[A-Za-z]:\//.test(path)) throw new Error("worktrees.directory must be an absolute path or start with ~/.");
    return path.replace(/\/+$/, "");
@@ -116,7 +116,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      const remove = props()?.action === "remove";
      if (this.busy || !this.repo || (remove && !this.repo.linked)) return;
 @@ -206,6 +299,7 @@
-     try { this.error = remove ? await this.remove() : await this.create(); }
+     try { this.error = remove ? await this.remove(cx) : await this.create(); }
      catch (error) { this.error = String(error); }
      this.busy = false;
 +    if (!this.error && this.branch) await this.deleteBranch();
@@ -142,11 +142,10 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      return "";
    }
  
-@@ -255,7 +351,17 @@
-       .find(([path]) => path === `worktree ${this.repo.top}`);
+@@ -256,6 +352,17 @@
      const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
      if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
--
+ 
 +    const steps = this.skipTeardown ? [] : this.scripts("teardown");
 +    if (steps.length) {
 +      const branch = (await git(this.repo.top, ["branch", "--show-current"], this.on)).out;
@@ -158,10 +157,10 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
 +        return `Teardown failed${r.code === null ? "" : ` (exit ${r.code})`}, nothing was removed.${tail ? `\n${tail}` : ""}\nEnter again removes it without the teardown.`;
 +      }
 +    }
-     // Git on a remote Windows machine reports a drive-letter or UNC path.
-     const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
-     const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
-@@ -362,9 +468,13 @@
+     if (s?.id) {
+       const tabs = new Set(s.tabs.map((tab) => tab.id));
+       this.closingTerminals = new Set(panes().filter((p) => p.terminal && tabs.has(p.tab)).map((p) => p.terminal));
+@@ -367,9 +474,13 @@
            : remove
              ? !r.linked
                ? "This is the repository's main checkout, not a worktree."
@@ -177,7 +176,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      return v_flex()
        .id("worktree")
        .track_focus(this.handle)
-@@ -376,6 +486,7 @@
+@@ -381,6 +492,7 @@
        .text_size(13)
        .child(div().font_semibold().text_color(t.foreground).child(title))
        .child(div().text_color(t.muted).child(detail))
@@ -185,7 +184,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
        .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
        .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
        .when(!remove && !blocked, (el) =>
-@@ -391,6 +502,7 @@
+@@ -396,6 +508,7 @@
              .text_color(t.foreground),
          ),
        )

@@ -1,6 +1,6 @@
-diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-20 10:29:35
-+++ b/mods/worktree/main.js	2026-11-20 10:30:25
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-24 09:46:32
++++ b/mods/worktree/main.js	2026-11-24 09:46:32
 @@ -54,6 +54,10 @@
    return value;
  };

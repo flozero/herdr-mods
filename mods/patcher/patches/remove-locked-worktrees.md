@@ -39,8 +39,8 @@ Since Herdr 0.1.17, `remove()` reads `git worktree list --porcelain` and refuses
 worktree: `const lock = checkout?.find(…)` followed by
 `if (lock) return lock === "locked" ? "This worktree is locked." : …;`. This patch replaces
 those two lines with the second Enter (`list` and `checkout` stay as Herdr has them, and the
-`git worktree list` error still stops the removal). The space closes once git has removed the
-checkout, or before it on Windows, as in Herdr.
+`git worktree list` error still stops the removal). Since Herdr 0.1.18 the space closes first and `remove()` waits for its terminals to stop
+before git removes the checkout, on every platform, as in Herdr.
 
 ## How to check it works
 

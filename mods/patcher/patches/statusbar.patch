@@ -1,6 +1,6 @@
 diff -ruN a/layouts/main.json b/layouts/main.json
---- a/layouts/main.json	2026-11-23 15:42:17
-+++ b/layouts/main.json	2026-11-23 15:43:14
+--- a/layouts/main.json	2026-11-24 09:46:32
++++ b/layouts/main.json	2026-11-24 09:46:32
 @@ -179,7 +179,7 @@
              "px": 28
            },
@@ -12,7 +12,7 @@ diff -ruN a/layouts/main.json b/layouts/main.json
        ]
 diff -ruN a/mods/workspace-status/context.js b/mods/workspace-status/context.js
 --- a/mods/workspace-status/context.js	1969-12-31 19:00:00
-+++ b/mods/workspace-status/context.js	2026-11-23 15:42:51
++++ b/mods/workspace-status/context.js	2026-11-24 09:46:32
 @@ -0,0 +1,111 @@
 +import { exec, appHome, shared, setShared } from "herdr";
 +
@@ -126,8 +126,8 @@ diff -ruN a/mods/workspace-status/context.js b/mods/workspace-status/context.js
 +  return (shared(KEY) ?? {})[root] ?? null;
 +}
 diff -ruN a/mods/workspace-status/main.js b/mods/workspace-status/main.js
---- a/mods/workspace-status/main.js	2026-11-23 15:42:17
-+++ b/mods/workspace-status/main.js	2026-11-23 15:56:38
+--- a/mods/workspace-status/main.js	2026-11-24 09:46:32
++++ b/mods/workspace-status/main.js	2026-11-24 09:46:32
 @@ -1,8 +1,135 @@
  import { View, div, svg } from "gpui-kit";
  import { h_flex } from "gpui-base";
