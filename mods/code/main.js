@@ -774,6 +774,7 @@ export default class Code extends View {
   }
 
   async loadChanges() {
+    if (this.isRepo === false) return;
     if (this.changesLoading) {
       this.changesAgain = true;
       return;
@@ -793,7 +794,7 @@ export default class Code extends View {
       this.applyScope();
       if (this.graph) this.loadGraph();
     } catch (error) {
-      this.message = `Changes: ${error?.message ?? error}`;
+      this.message = `Changes: ${String(error?.message ?? error).split("\n")[0]}`;
     }
     this.changesLoading = false;
     this.redraw();
@@ -1409,6 +1410,7 @@ export default class Code extends View {
   async loadRoot(folder) {
     const top = await exec("git", ["-C", folder, "rev-parse", "--show-toplevel"]);
     this.root = top.code === 0 ? top.stdout.trim() : folder;
+    this.isRepo = top.code === 0;
     const saved = (await readComments())[this.root];
     if (Array.isArray(saved) && saved.length && !this.comments.length) {
       this.comments = saved;
@@ -2592,7 +2594,7 @@ export default class Code extends View {
         .child(this.changes.branch === "HEAD" ? "⎇ detached HEAD" : `⎇ ${this.changes.branch}`)))
       .child(div().min_w(0).truncate().child(servers || "no language server"))
       .child(div().flex_1())
-      .child(div().min_w(0).truncate().child(this.message))
+      .child(div().min_w(0).max_h(18).overflow_hidden().truncate().child(String(this.message ?? "").split("\n")[0]))
       .child(div().id("shortcuts-hint").px(6).rounded(4).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop).on_click(() => this.toggleShortcuts())
         .child(`Shortcuts ${this.hint("shortcuts")}`));
