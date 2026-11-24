@@ -1,7 +1,6 @@
 {
   "global": {
     "cmd-t": "tab.new",
-    "cmd-w": "tab.close",
     "cmd-shift-]": "tab.next",
     "cmd-}": "tab.next",
     "cmd-shift-[": "tab.prev",

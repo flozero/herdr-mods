@@ -12,3 +12,5 @@ retarget_keys global "$@"
 set --
 for n in 1 2 3 4 5 6 7 8 9; do set -- "$@" "cmd-$n tab.select:$n"; done
 drop_keys global "$@"
+# cmd-w used to close the tab here; Super + W is Omarchy's close window again, and Linux's own ctrl-shift-w closes a tab.
+drop_keys global "cmd-w tab.close"

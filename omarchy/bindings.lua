@@ -1,6 +1,6 @@
 -- Herdr's shortcuts, and its mods', are the macOS ones with cmd = Super (see the herdr-mods README, "Linux and Omarchy").
--- This frees the Omarchy chords they need. SUPER + Return (terminal), SUPER + Q (close window) and the
--- universal clipboard (SUPER + C / V / X / A) stay.
+-- This frees the Omarchy chords they need. SUPER + Return (terminal), SUPER + W and SUPER + Q (close window)
+-- and the universal clipboard (SUPER + C / V / X / A) stay: Herdr closes a tab with ctrl-shift-w.
 
 -- Herdr's mods (keys/*.linux.json)
 for _, keys in ipairs({
@@ -21,7 +21,6 @@ end
 
 -- Herdr's own (keys/herdr.linux.json)
 for _, keys in ipairs({
-  "SUPER + W",                 -- Close window (SUPER + Q still does)    -> cmd-w: close the tab
   "SUPER + T",                 -- Toggle floating/tiling                 -> cmd-t: new tab
   "SUPER + P",                 -- Pseudo window                          -> cmd-p: picker
   "SUPER + SHIFT + D",         -- Docker                                 -> cmd-shift-d: split down
