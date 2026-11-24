@@ -41,7 +41,7 @@ export const project = (cwd) => get(cwd, "projects/:id");
 export const me = (cwd) => get(cwd, "user");
 export const reviewing = (cwd, username) =>
   all(cwd, `projects/:id/merge_requests?state=opened&reviewer_username=${encodeURIComponent(username)}&order_by=updated_at&per_page=100`);
-export const mergeRequest = (cwd, iid) => get(cwd, mrPath(iid));
+export const mergeRequest = (cwd, iid) => get(cwd, `${mrPath(iid)}?include_diverged_commits_count=true`);
 export const forBranch = (cwd, branch) =>
   get(cwd, `projects/:id/merge_requests?state=opened&source_branch=${encodeURIComponent(branch)}`);
 export const intoBranch = (cwd, branch) =>
@@ -102,7 +102,7 @@ export async function reviewState(cwd, projectPath, iid, username) {
 export async function sidebar(cwd, projectPath, iid) {
   const d = await graphql(cwd, `query($p: ID!, $i: String!) { project(fullPath: $p) { mergeRequest(iid: $i) {
     assignees { nodes { username name } }
-    reviewers { nodes { username name mergeRequestInteraction { reviewState approved } } }
+    reviewers { nodes { id username name mergeRequestInteraction { reviewState approved } } }
     participants { nodes { username name } }
     labels { nodes { title color textColor description } }
     milestone { title dueDate }
@@ -112,13 +112,20 @@ export async function sidebar(cwd, projectPath, iid) {
   if (!m) return null;
   return {
     assignees: m.assignees?.nodes ?? [],
-    reviewers: (m.reviewers?.nodes ?? []).map((r) => ({ username: r.username, name: r.name, state: r.mergeRequestInteraction?.reviewState ?? null, approved: Boolean(r.mergeRequestInteraction?.approved) })),
+    reviewers: (m.reviewers?.nodes ?? []).map((r) => ({ id: r.id, username: r.username, name: r.name, state: r.mergeRequestInteraction?.reviewState ?? null, approved: Boolean(r.mergeRequestInteraction?.approved) })),
     participants: m.participants?.nodes ?? [],
     labels: m.labels?.nodes ?? [],
     milestone: m.milestone ?? null,
     approvalsLeft: m.approvalsLeft ?? null,
     approvalsRequired: m.approvalsRequired ?? null,
   };
+}
+
+export async function rerequestReview(cwd, projectPath, iid, userId) {
+  const d = await graphql(cwd, "mutation($p: ID!, $i: String!, $u: UserID!) { mergeRequestReviewerRereview(input: { projectPath: $p, iid: $i, userId: $u }) { errors } }",
+    { p: projectPath, i: String(iid), u: userId });
+  const errors = d.mergeRequestReviewerRereview?.errors ?? [];
+  if (errors.length) throw new Error(errors.join("; "));
 }
 
 export const compare = (cwd, from, to) =>
@@ -160,3 +167,39 @@ export const merged = (cwd, username) =>
   get(cwd, `projects/:id/merge_requests?state=merged&reviewer_username=${encodeURIComponent(username)}&order_by=merged_at&sort=desc&per_page=30`);
 
 export const commits = (cwd, iid) => all(cwd, `projects/:id/merge_requests/${iid}/commits?per_page=100`);
+
+export const resolveDiscussion = (cwd, iid, discussionId, resolved) => send(cwd, "PUT", `${mrPath(iid)}/discussions/${discussionId}`, { resolved });
+export const setTitle = (cwd, iid, title) => send(cwd, "PUT", mrPath(iid), { title });
+export const setLabels = (cwd, iid, add, remove) => send(cwd, "PUT", mrPath(iid), { add_labels: add.join(","), remove_labels: remove.join(",") });
+export const setMilestone = (cwd, iid, milestoneId) => send(cwd, "PUT", mrPath(iid), { milestone_id: milestoneId ?? 0 });
+export const labels = (cwd, search) => get(cwd, `projects/:id/labels?per_page=30&search=${encodeURIComponent(search)}`);
+export const milestones = (cwd) => get(cwd, "projects/:id/milestones?state=active&include_ancestors=true&per_page=50");
+export const editNote = (cwd, iid, noteId, body) => send(cwd, "PUT", `${mrPath(iid)}/notes/${noteId}`, { body });
+export const deleteNote = (cwd, iid, noteId) => send(cwd, "DELETE", `${mrPath(iid)}/notes/${noteId}`);
+
+export async function fileAt(cwd, path, ref) {
+  const [f, text] = await Promise.all([get(cwd, `projects/:id/repository/files/${encodeURIComponent(path)}?ref=${encodeURIComponent(ref)}`), raw(cwd, path, ref)]);
+  return { text, lastCommit: f.last_commit_id };
+}
+
+export const commitFile = (cwd, branch, message, path, content, lastCommit) =>
+  send(cwd, "POST", "projects/:id/repository/commits", { branch, commit_message: message, actions: [{ action: "update", file_path: path, content, last_commit_id: lastCommit }] });
+
+export async function awards(cwd, projectPath, iid) {
+  const d = await graphql(cwd, `query($p: ID!, $i: String!) { project(fullPath: $p) { mergeRequest(iid: $i) {
+    id awardEmoji { nodes { name emoji user { username } } }
+    notes(first: 100) { nodes { id awardEmoji { nodes { name emoji user { username } } } } }
+  } } }`, { p: projectPath, i: String(iid) });
+  const m = d.project?.mergeRequest;
+  if (!m) return null;
+  const list = (x) => (x?.awardEmoji?.nodes ?? []).map((a) => ({ name: a.name, emoji: a.emoji, username: a.user?.username }));
+  const notes = {};
+  for (const n of m.notes?.nodes ?? []) notes[n.id.split("/").pop()] = list(n);
+  return { mr: list(m), mrId: m.id, notes };
+}
+
+export async function toggleAward(cwd, awardableId, name) {
+  const d = await graphql(cwd, "mutation($a: AwardableID!, $n: String!) { awardEmojiToggle(input: { awardableId: $a, name: $n }) { errors } }", { a: awardableId, n: name });
+  const errors = d.awardEmojiToggle?.errors ?? [];
+  if (errors.length) throw new Error(errors.join("; "));
+}
