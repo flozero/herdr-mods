@@ -1,3 +1,6 @@
 {
-  "global": { "ctrl-shift-e": "mod.open:code-open" }
+  "global": {
+    "cmd-e": "mod.open:code-open",
+    "ctrl-alt-c": "mod.open:code-open"
+  }
 }

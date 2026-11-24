@@ -15,9 +15,9 @@ Review GitLab merge requests in a Herdr window: your merge requests, the ones to
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-shift-g` | `ctrl-alt-g` | open the window, on the merge request of the focused folder |
+| `cmd-shift-g` | `cmd-shift-g`, or `ctrl-alt-g` | open the window, on the merge request of the focused folder |
 | `alt-enter` | `alt-enter` | ask the agent, in the window |
-| `cmd-r` | `ctrl-r` | refresh, in the window |
+| `cmd-r` | `cmd-r`, or `ctrl-r` | refresh, in the window |
 
 From `keys/gitlab-review.json` and `keys/gitlab-review.linux.json`. The other keys are shown at the bottom of the window.
 

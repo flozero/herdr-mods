@@ -1,4 +1,10 @@
 {
-  "global": { "ctrl-alt-e": "mod.open:excalidraw" },
-  "terminal": { "ctrl-alt-e": "mod.open:excalidraw" }
+  "global": {
+    "cmd-shift-e": "mod.open:excalidraw",
+    "ctrl-alt-e": "mod.open:excalidraw"
+  },
+  "terminal": {
+    "cmd-shift-e": "mod.open:excalidraw",
+    "ctrl-alt-e": "mod.open:excalidraw"
+  }
 }

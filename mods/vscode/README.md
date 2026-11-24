@@ -16,7 +16,7 @@ The web view uses `webview(url, { keep: true })`, so code-server isn't reloaded 
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-alt-e` | `ctrl-alt-shift-e` | open VS Code beside the focused pane |
+| `cmd-alt-e` | `cmd-alt-e`, or `ctrl-alt-shift-e` | open VS Code beside the focused pane |
 
 From `keys/vscode.json` and `keys/vscode.linux.json`. While the web view has the keyboard, Herdr only keeps the keys listed in `webview_keys` in `~/.config/herdr-app/settings.json` (the fork's default: `cmd-q`, `cmd-shift-w`, `ctrl-tab`, `ctrl-shift-tab`). On macOS, `install-vscode.sh` adds `cmd-alt-e` and `cmd-e` (the code mod) to it, keeping your entries; if you bind another key to `mod.open:vscode-open`, add it there too.
 

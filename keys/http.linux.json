@@ -1,3 +1,6 @@
 {
-  "global": { "ctrl-alt-h": "mod.open:http-open" }
+  "global": {
+    "cmd-shift-h": "mod.open:http-open",
+    "ctrl-alt-h": "mod.open:http-open"
+  }
 }

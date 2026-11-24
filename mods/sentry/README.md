@@ -10,9 +10,9 @@ Sentry issues in a Herdr window, through Sentry's MCP server: your team's issues
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-s` | `ctrl-shift-s` | the Sentry issue the focused terminal mentions (or the list) |
-| `cmd-shift-s` | `ctrl-alt-s` | open the window |
-| `cmd-r` | `ctrl-r` | refresh, in the window |
+| `cmd-s` | `cmd-s`, or `ctrl-shift-s` | the Sentry issue the focused terminal mentions (or the list) |
+| `cmd-shift-s` | `cmd-shift-s`, or `ctrl-alt-s` | open the window |
+| `cmd-r` | `cmd-r`, or `ctrl-r` | refresh, in the window |
 
 From `keys/sentry.json` and `keys/sentry.linux.json`. The other keys are shown at the bottom of the window.
 

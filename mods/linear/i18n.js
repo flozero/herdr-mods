@@ -1,5 +1,7 @@
 // UI text. English is the default; set "language": "ko" in config.json for Korean.
 
+import { keyLabels } from "./kbd.js";
+
 const en = {
   tabs: { mine: "My issues", recent: "Recent", all: "All" },
   priority: { 1: "Urgent", 2: "High", 3: "Medium", 4: "Low" },
@@ -249,9 +251,18 @@ const ko = {
 const LANGS = { en, ko: { ...en, ...ko } };
 let current = en;
 
-export function setLanguage(tag) {
+// Off macOS the hints say ⌃↵ where they say ⌘↵ (see kbd.js): the whole table, strings and what functions return.
+const localize = (v, platform) =>
+  typeof v === "string" ? keyLabels(v, platform)
+  : typeof v === "function" ? (...args) => localize(v(...args), platform)
+  : Array.isArray(v) ? v.map((x) => localize(x, platform))
+  : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, localize(x, platform)]))
+  : v;
+
+export function setLanguage(tag, platform) {
   const base = String(tag ?? "en").toLowerCase().split(/[-_]/)[0];
-  current = LANGS[base] ?? en;
+  const table = LANGS[base] ?? en;
+  current = !platform || platform === "macos" ? table : localize(table, platform);
 }
 
 export const T = () => current;

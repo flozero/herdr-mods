@@ -16,9 +16,9 @@
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-shift-n` | `ctrl-alt-n` | New worktree |
-| `cmd-shift-o` | `ctrl-alt-o` | Open worktree |
-| `cmd-alt-p` | `ctrl-alt-p` | Patcher: apply the patches again, show each one |
+| `cmd-shift-n` | `cmd-shift-n`, or `ctrl-alt-n` | New worktree |
+| `cmd-shift-o` | `cmd-shift-o`, or `ctrl-alt-o` | Open worktree |
+| `cmd-alt-p` | `cmd-alt-p`, or `ctrl-alt-p` | Patcher: apply the patches again, show each one |
 
 From `keys/worktree.json` and `keys/worktree.linux.json`.
 

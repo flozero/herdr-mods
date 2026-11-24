@@ -1,9 +1,10 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
-import { theme, props, closeOverlay, run, spaces, panes, focused, exec, appHome, home, nextCommand } from "herdr";
+import { theme, props, closeOverlay, run, spaces, panes, focused, exec, appHome, home, nextCommand, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import { TABS, PERIODS, SORTS, target, shortIdIn, queryFor, ago, count } from "./sentry.js";
 import { agentArgv, agentName } from "./agent.js";
+import { keyLabels } from "./kbd.js";
 
 const BASE = "mods/sentry";
 const ICON = `${BASE}/icons`;
@@ -16,6 +17,8 @@ const LEVEL = { fatal: "#c4314b", error: "#e5484d", warning: "#f5a524", info: "#
 const SUBSTATUS = { new: "new", regressed: "regressed", escalating: "escalating" };
 const DAY = 86400000;
 const stop = (_e, cx) => cx.stop_propagation();
+let platform;
+const kbd = (text) => keyLabels(text, (platform ??= appWindow()?.platform));
 
 export default class Sentry extends View {
   init(_props, cx) {
@@ -352,7 +355,7 @@ export default class Sentry extends View {
 
   onKey(e, cx) {
     const k = e.keystroke.replace(/(^|-)fn-/, "$1");
-    if (k === "cmd-r") { this.reload(cx); cx.stop_propagation(); return; }
+    if (k === "cmd-r" || k === "ctrl-r") { this.reload(cx); cx.stop_propagation(); return; }
     if (this.typing) {
       if (k === "escape") { this.handle.focus(); cx.stop_propagation(); }
       else if (k === "down") { this.handle.focus(); cx.stop_propagation(); }
@@ -370,7 +373,7 @@ export default class Sentry extends View {
       down: () => { this.sel = Math.min(list.length - 1, this.sel + 1); cx.notify(); },
       up: () => { this.sel = Math.max(0, this.sel - 1); cx.notify(); },
       enter: () => issue && this.open({ issueId: issue.shortId }, cx),
-      "/": () => this.input.focus(), "cmd-f": () => this.input.focus(),
+      "/": () => this.input.focus(), "cmd-f": () => this.input.focus(), "ctrl-f": () => this.input.focus(),
       1: () => this.setTab(this.tabs()[0], cx), 2: () => this.setTab(this.tabs()[1], cx), 3: () => this.setTab(this.tabs()[2], cx),
       tab: () => this.setTab(this.tabs()[(this.tabs().indexOf(this.tab) + 1) % this.tabs().length], cx),
       p: () => this.cycle("period", cx), f: () => this.cycle("sort", cx), r: () => this.reload(cx),
@@ -398,7 +401,7 @@ export default class Sentry extends View {
       .when(!enabled, (el) => el.opacity(0.5))
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => action(cx)))
       .on_mouse_down("left", stop)
-      .child(label);
+      .child(kbd(label));
   }
 
   chip(t, text, color) {
@@ -506,7 +509,7 @@ export default class Sentry extends View {
       : `↑↓ move · Enter open · / search or paste an id · 1–3 / Tab lists · p period · f sort · c work with ${agentName(this.config)} · a assign me · ⇧I ignore · ⇧R resolve · o Sentry · ⌘R refresh · Esc close`;
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
-      .child(div().flex_1().min_w(0).truncate().text_color(color).child(s?.text ?? hint))
+      .child(div().flex_1().min_w(0).truncate().text_color(color).child(kbd(s?.text ?? hint)))
       .child(div().flex_none().text_color(t.dim).child(this.me?.name ?? ""));
   }
 }

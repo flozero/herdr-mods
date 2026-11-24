@@ -5,7 +5,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, h_resizable, resizable_panel } from "gpui-base";
-import { theme, props, closeOverlay, run, focused, panes, spaces, terminals, exec, hc, home, appHome, nextCommand } from "herdr";
+import { theme, props, closeOverlay, run, focused, panes, spaces, terminals, exec, hc, home, appHome, nextCommand, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import * as api from "./api.js";
 import * as Q from "./query.js";
@@ -304,7 +304,7 @@ export default class Linear extends View {
       Object.assign(this.config, c);
     } catch {}
     api.setRunner((calls) => this.linearBatch(calls));
-    setLanguage(this.config.language ?? "en");
+    setLanguage(this.config.language ?? "en", appWindow()?.platform);
   }
 
   agentName() {
@@ -1630,7 +1630,7 @@ export default class Linear extends View {
 
   onKey(e, cx) {
     const k = e.keystroke;
-    if (k === "cmd-r") { this.reload(cx); cx.stop_propagation(); return; }
+    if (k === "cmd-r" || k === "ctrl-r") { this.reload(cx); cx.stop_propagation(); return; }
     if (this.handle.is_focused()) this.typing = false;
     const id = this.shownId();
     const issue = id ? (this.details[id]?.issue ?? this.cache[id]) : null;

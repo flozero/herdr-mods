@@ -10,9 +10,9 @@ An HTTP client in a Herdr window: method, URL, query, headers and body, the resp
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-shift-h` | `ctrl-alt-h` | open the window |
+| `cmd-shift-h` | `cmd-shift-h`, or `ctrl-alt-h` | open the window |
 | `cmd-enter` | `ctrl-enter` | send, in the window |
-| `cmd-shift-c` | `ctrl-shift-c` | copy as curl, in the window |
+| `cmd-shift-c` | `cmd-shift-c`, or `ctrl-shift-c` | copy as curl, in the window |
 
 The open key comes from `keys/http.json` and `keys/http.linux.json`.
 

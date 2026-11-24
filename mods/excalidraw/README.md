@@ -18,7 +18,7 @@ It runs over stdio (no network port) and has six tools: `open_canvas`, `read_can
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-shift-e` | `ctrl-alt-e` | open the canvas |
+| `cmd-shift-e` | `cmd-shift-e`, or `ctrl-alt-e` | open the canvas |
 
 From `keys/excalidraw.json` and `keys/excalidraw.linux.json`.
 

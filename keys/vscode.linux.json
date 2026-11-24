@@ -1,3 +1,6 @@
 {
-  "global": { "ctrl-alt-shift-e": "mod.open:vscode-open" }
+  "global": {
+    "cmd-alt-e": "mod.open:vscode-open",
+    "ctrl-alt-shift-e": "mod.open:vscode-open"
+  }
 }

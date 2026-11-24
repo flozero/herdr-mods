@@ -17,9 +17,9 @@ Linear issues in a Herdr window: your issues, all issues, saved views and projec
 
 | macOS | Linux | |
 | --- | --- | --- |
-| `cmd-i` | `ctrl-shift-i` | the issue of the focused tab (or the list) |
-| `cmd-shift-i` | `ctrl-alt-i` | open the window |
-| `cmd-r` | `ctrl-r` | refresh, in the window |
+| `cmd-i` | `cmd-i`, or `ctrl-shift-i` | the issue of the focused tab (or the list) |
+| `cmd-shift-i` | `cmd-shift-i`, or `ctrl-alt-i` | open the window |
+| `cmd-r` | `cmd-r`, or `ctrl-r` | refresh, in the window |
 
 From `keys/linear.json` and `keys/linear.linux.json`. The other keys are shown at the bottom of the window.
 

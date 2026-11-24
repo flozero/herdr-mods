@@ -6250,12 +6250,12 @@ var Excalidraw = class extends View {
     }
     const k2 = e4.keystroke;
     const map = this.map();
-    if (k2 === "cmd-z") return this.undo(cx);
-    if (k2 === "cmd-shift-z" || k2 === "cmd-y") return this.redo(cx);
+    if (k2 === "cmd-z" || k2 === "ctrl-z") return this.undo(cx);
+    if (k2 === "cmd-shift-z" || k2 === "ctrl-shift-z" || k2 === "cmd-y" || k2 === "ctrl-y") return this.redo(cx);
     if (k2 === "cmd-c" || k2 === "cmd-x" || k2 === "ctrl-c" || k2 === "ctrl-x") return this.copySelection(cx, k2.endsWith("x"));
     if (k2 === "cmd-v" || k2 === "ctrl-v") return this.pasteClipboard(cx);
     if (k2 === "ctrl-d") return this.duplicateSelection(cx);
-    if (k2 === "cmd-a") {
+    if (k2 === "cmd-a" || k2 === "ctrl-a") {
       this.tool = "selection";
       this.selected = new Set(this.elements().filter((el) => !(el.type === "text" && el.containerId)).map((el) => el.id));
       cx.notify(this.liveView);

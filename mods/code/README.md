@@ -22,7 +22,7 @@ Select lines and comment them; send the comments to the agent working in the rep
 
 ## Keys
 
-`cmd-e` (Linux `ctrl-shift-e`) opens it, from `keys/code.json` and `keys/code.linux.json`. In the editor:
+`cmd-e` (on Linux too, or `ctrl-alt-c`) opens it, from `keys/code.json` and `keys/code.linux.json`. In the editor:
 
 | Key | |
 | --- | --- |

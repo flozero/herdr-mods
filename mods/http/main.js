@@ -1,7 +1,8 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView } from "gpui-base";
-import { theme, props, closeOverlay, exec, appHome, home, readTextFile, writeTextFile } from "herdr";
+import { theme, props, closeOverlay, exec, appHome, home, readTextFile, writeTextFile, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
+import { keyLabels } from "./kbd.js";
 import { METHODS, curlArgs, curlCommand, parseWrite, parseHeaders, pretty, sizeText, parseQuery, buildUrl, rowsOf, linesOf, safeName } from "./request.js";
 
 const BASE = "mods/http";
@@ -14,6 +15,8 @@ const KEEP = 50;
 const SHOW_MAX = 300000;
 const HISTORY_W = 250;
 const stop = (_e, cx) => cx.stop_propagation();
+let platform;
+const kbd = (text) => keyLabels(text, (platform ??= appWindow()?.platform));
 const statusColor = (s, t) => (s >= 500 ? t.blocked : s >= 400 ? "#f08c00" : s >= 300 ? t.accent : s >= 200 ? t.done : t.dim);
 
 export default class Http extends View {
@@ -372,7 +375,7 @@ export default class Http extends View {
       .when(!enabled, (el) => el.opacity(0.5))
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(primary ? t.solid : t.hover)).on_click((_e, cx) => action(cx)))
       .on_mouse_down("left", stop)
-      .child(label);
+      .child(kbd(label));
   }
 
   table(t, kind) {
@@ -549,6 +552,6 @@ export default class Http extends View {
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).items_center().border_t(1).border_color(t.border).text_size(11)
       .child(div().flex_1().min_w(0).truncate().text_color(color)
-        .child(s?.text ?? (this.openReq ? `${this.openReq.project} / ${this.openReq.name} saves itself as you edit · ⌘↵ send · ⌘⇧C copy as curl` : "⌘↵ send · ⌘⇧C copy as curl · + beside a project saves a request in it · Params follow the URL both ways")));
+        .child(kbd(s?.text ?? (this.openReq ? `${this.openReq.project} / ${this.openReq.name} saves itself as you edit · ⌘↵ send · ⌘⇧C copy as curl` : "⌘↵ send · ⌘⇧C copy as curl · + beside a project saves a request in it · Params follow the URL both ways"))));
   }
 }

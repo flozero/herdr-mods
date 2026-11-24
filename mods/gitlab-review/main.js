@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
-import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home } from "herdr";
+import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import * as gl from "./gitlab.js";
 import { parseDiff, onRow, excerpt, position, splitRows, splitGitDiff, gapAt, expandGap } from "./diff.js";
@@ -10,6 +10,7 @@ import { fetchRules, matchRules } from "./rules.js";
 import { editPoint, mentionAt, rankPeople, insertMention } from "./mention.js";
 import { branchCheckout, installedEditors, openIn, worktreeSetup, HERDR_EDITOR } from "./editor.js";
 import { agentArgv, agentName, askArgv } from "./agent.js";
+import { keyLabels } from "./kbd.js";
 
 
 const MONO = "JetBrains Mono";
@@ -59,6 +60,8 @@ const LOCAL_EVERY = 3000;
 const FILE_STATE = [["uncommitted", "not committed", "accent"], ["committed", "committed", "muted"], ["pushed", "pushed", "done"]];
 const GENERAL = { kind: "general" };
 const stop = (_e, cx) => cx.stop_propagation();
+let platform;
+const kbd = (text) => keyLabels(text, (platform ??= appWindow()?.platform));
 const safeBranch = (b) => (/^[\w./-]+$/.test(String(b ?? "")) ? b : "<the source branch from glab mr view>");
 
 function ago(iso) {
@@ -2097,7 +2100,7 @@ export default class GitlabReview extends View {
 
   onKey(e, cx) {
     const k = e.keystroke.replace(/(^|-)fn-/, "$1");
-    if (k === "cmd-r") { this.reload(cx); cx.stop_propagation(); return; }
+    if (k === "cmd-r" || k === "ctrl-r") { this.reload(cx); cx.stop_propagation(); return; }
     if (this.editorMenu && k === "escape") { this.toggleEditorMenu(cx); cx.stop_propagation(); return; }
     if (this.peopleFocused || (this.peoplePick && k === "escape")) {
       if (this.peopleKey(k, cx)) cx.stop_propagation();
@@ -2572,7 +2575,7 @@ export default class GitlabReview extends View {
       : "1–5 / Tab ⇧Tab lists · p pick someone · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
-      .child(div().flex_1().min_w(0).truncate().text_color(color).child(s?.text ?? hint))
+      .child(div().flex_1().min_w(0).truncate().text_color(color).child(kbd(s?.text ?? hint)))
       .child(div().flex_none().text_color(t.dim).child(this.local ? this.top ?? "" : this.user ? `@${this.user.username}` : ""));
   }
 
@@ -2582,7 +2585,7 @@ export default class GitlabReview extends View {
       .when(!enabled, (el) => el.opacity(0.5))
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(primary ? t.solid : t.hover)).on_click((_e, cx) => action(cx)))
       .on_mouse_down("left", stop)
-      .child(label);
+      .child(kbd(label));
   }
 
   linkChip(t, id, text, color, url) {
@@ -2939,7 +2942,7 @@ export default class GitlabReview extends View {
       const notes = q ? this.notes.filter((x) => has(x.note, q) || has(x.position?.new_path, q)) : this.notes;
       return view
         .child(div().text_size(12).font_semibold().child(`Your review · ${notes.length}`))
-        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to ${this.agentName()} (a)${this.remote ? " or Post on GitLab" : ""}`)))
+        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(kbd(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to ${this.agentName()} (a)${this.remote ? " or Post on GitLab" : ""}`))))
         .children(notes.map((x) => this.draftView(t, d, x, true)))
         .when(list.length > 0, (el) => el.child(div().pt(8).text_size(12).font_semibold().child(`Pending on GitLab · ${list.length}`)))
         .children(list.map((x) => this.draftView(t, d, x)));
@@ -2947,7 +2950,7 @@ export default class GitlabReview extends View {
     if (!list.length) {
       return view.child(v_flex().items_center().gap(6).pt(24).text_color(t.dim)
         .child(this.q() ? "No match" : "No pending comment")
-        .child(div().text_size(11.5).child("Write a comment and press ⌘↵: it waits here until you submit your review")));
+        .child(div().text_size(11.5).child(kbd("Write a comment and press ⌘↵: it waits here until you submit your review"))));
     }
     return view.children(list.map((x) => this.draftView(t, d, x)));
   }
