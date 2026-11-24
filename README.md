@@ -14,6 +14,20 @@ cd herdr-mods
 
 Then, once: `cmd-alt-p` (`ctrl-alt-p` on Linux) and click **Use the my-main layout**. The worktree mods only work in that layout (see [worktree](mods/worktree-new/README.md)).
 
+## Linux and Omarchy
+
+On Linux `cmd` is the Super key (the Windows key, or the Command key of an Apple keyboard): every `cmd-…` key of these mods works the same as on macOS, as long as nothing else has taken it. Each also has a Ctrl twin (the "Linux" keys below), bound next to it in `keys/<group>.linux.json`, for a desktop that keeps Super for itself.
+
+Omarchy (Hyprland) takes many Super chords before Herdr sees them. `./omarchy/install.sh` is an optional step that frees the ones Herdr and its mods use, in `~/.config/hypr/bindings.lua`, between two marker lines (the full list, with what each chord did, is in `omarchy/bindings.lua`). It keeps a backup next to the file, reloads Hyprland and puts the backup back if Hyprland reports an error; run it again to update the block, and `./omarchy/install.sh --remove` takes it out. `install-all.sh` doesn't run it: it changes your Omarchy shortcuts.
+
+It frees: Full screen, Switch input language (both), Toggle scratchpad, Calendar, Email, File manager, Signal, Editor, Obsidian, Google Maps, Close window on `Super + W` (`Super + Q` still closes), Toggle floating, Pseudo window, Docker, Omawrite, Browser on `Super + Shift + Return` (`Super + Shift + B` still opens it), the window-group moves on `Super + Alt + arrows`, and the webcam overlay size. The workspaces move from `Super + 1..9, 0` to `Super + Alt + 1..9, 0`. `Super + Return` (the terminal) stays, so sending a comment, a request or a description is `ctrl-enter` on Linux (the hints say `⌃↵`). `Super + C / V / X / A` are Omarchy's universal clipboard: Herdr gets them as `ctrl-…`, which is why `cmd-c` and `cmd-v` work. `cmd-alt-p` (the patcher) is `Super + Alt + P`, which a Chroma setup also uses: `ctrl-alt-p` is its twin.
+
+### Herdr's own shortcuts
+
+`./install-herdr.sh` (Linux only, `install-all.sh` runs it) gives Herdr the macOS keymap, with cmd = Super, from `keys/herdr.linux.json`: `cmd-d` / `cmd-shift-d` split right / down, `cmd-t` / `cmd-w` new / close tab, `cmd-1..9` select a tab, `ctrl-1..9` a space (it moves Linux's own `ctrl-1..9` from tabs to spaces, unless you changed them), `cmd-n` new space, `cmd-shift-[` / `]` previous / next tab, `cmd-alt-[` / `]` previous / next space, `cmd-[` / `]` previous / next agent, `cmd-alt-arrows` go to a pane, `cmd-shift-enter` zoom the pane, `cmd-shift-w` close it, `cmd-p` the picker, `cmd-b` the sidebar, `cmd-shift-l` the layout, `cmd-f` search in a terminal. Linux's own keys keep working next to them.
+
+Left to the Linux keys, because Linux has one that everyone knows or because Omarchy needs the chord: zoom (`ctrl-=`, `ctrl--`, `ctrl-0`), settings and help (`ctrl-,`, `ctrl-?`), the palette (`ctrl-shift-p`), `cmd-q` (`Super + Q` closes the window) and `cmd-m` (Omarchy minimizes).
+
 ## Update
 
 ```sh
@@ -36,7 +50,7 @@ Each group installs alone (`./install-<group>.sh`) and has its README: what it d
 - [sentry](mods/sentry/README.md): Sentry issues through Sentry's MCP. `cmd-s` / `cmd-shift-s` (Linux `ctrl-shift-s` / `ctrl-alt-s`).
 - [http](mods/http/README.md): an HTTP client. `cmd-shift-h` (Linux `ctrl-alt-h`).
 - [excalidraw](mods/excalidraw/README.md): an Excalidraw canvas an agent can draw on. `cmd-shift-e` (Linux `ctrl-alt-e`).
-- [code](mods/code/README.md): Herdr's own editor with language servers, the branch's changes and review comments for the agent, needs the Herdr fork with the editor language-server API. `cmd-e` (Linux `ctrl-shift-e`).
+- [code](mods/code/README.md): Herdr's own editor with language servers, the branch's changes and review comments for the agent, needs the Herdr fork with the editor language-server API. `cmd-e` (Linux `ctrl-alt-c`).
 - [vscode](mods/vscode/README.md): VS Code in a pane, needs the Herdr fork with the webview. `cmd-alt-e` (Linux `ctrl-alt-shift-e`).
 
 The agent is Claude by default; `agent` and `agentName` in a mod's `config.json` (in `settings.json` `worktrees` for the worktree mods) pick another.
