@@ -1,0 +1,8 @@
+{
+  // The code mod gives the SQL server this configuration when the repository has no postgres-language-server.jsonc of its own.
+  // Syntax errors stay. The migration lints are off: they warn on every statement of a generated migration (a lock timeout, several
+  // ALTER TABLE) and there is nothing to do about it. And it connects to no database: it only does once the repository says which.
+  "linter": { "enabled": false },
+  "splinter": { "enabled": false },
+  "db": { "disableConnection": true }
+}

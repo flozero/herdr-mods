@@ -1,7 +1,9 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, TextView, v_virtual_list } from "gpui-base";
 import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile, closeOverlay, run, watchFolder } from "herdr";
 import { launch, fileUri, uriPath } from "./lsp.js";
+import { dockerLanguage } from "./docker.js";
+import { plainCompletion } from "./snippet.js";
 import { branchDiff, workingDiff, commitGraph, commitDiff, agentLabel } from "./review/local.js";
 import { lineDiff } from "./review/diff.js";
 import { findReview, publishReview, reviewThreads, replyThread, resolveThread } from "./review/forge.js";
@@ -24,12 +26,16 @@ const readComments = async () => {
 };
 const SERVERS_DIR = () => `${CACHE_DIR()}/servers`;
 const stop = (_e, cx) => cx.stop_propagation();
+// ctrl + the platform key (Super on Linux) held with a click: show where the symbol is used. Super alone moves windows on Omarchy,
+// ctrl alone is the editor's go to definition, so the two together are free.
+const usesChord = (modifiers) => Boolean(modifiers?.control && modifiers?.platform);
 
 const ACTIONS = [
   { id: "files", key: "ctrl-p", label: "Find a file", run: (view) => view.focusFinder() },
   { id: "search", key: "cmd-shift-f", aliases: ["ctrl-shift-f"], label: "Find and replace in the project", run: (view) => view.startGrep() },
   { id: "sidebar", key: "ctrl-b", label: "Show or hide the sidebar", run: (view) => view.toggleSidebar() },
   { id: "changes", key: "ctrl-shift-g", label: "Switch between files and changes", run: (view) => view.toggleChanges() },
+  { id: "preview", key: "ctrl-shift-v", label: "Show or hide the Markdown preview", run: (view) => view.togglePreview() },
   { id: "comment", key: "ctrl-k", label: "Comment the selected lines", run: (view) => view.startComment() },
   { id: "send", key: "ctrl-enter", label: "Send the review to the agent", run: (view) => view.sendReview() },
   { id: "publish", key: "ctrl-shift-enter", label: "Publish the review on the MR/PR", run: (view) => view.publish() },
@@ -50,9 +56,9 @@ const ACTIONS = [
   { id: "shortcuts", key: "ctrl-/", label: "Show the shortcuts", run: (view) => view.toggleShortcuts() },
 ];
 
-const FIXED_SHORTCUTS = [["cmd-click", "Go to definition"], ["ctrl-click, right click", "Show where it is used"], ["escape", "Back to the editor, or cancel"]];
+const FIXED_SHORTCUTS = [["cmd-click", "Go to definition"], ["ctrl-click, right click", "Show where it is used"], ["ctrl-cmd-click", "Show where it is used"], ["middle-click", "Close a tab (click it)"], ["escape", "Back to the editor, or cancel"]];
 
-const KEY_SYMBOLS = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", enter: "⏎", escape: "Esc", left: "←", right: "→", up: "↑", down: "↓", tab: "⇥", click: " click" };
+const KEY_SYMBOLS = { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", enter: "⏎", escape: "Esc", left: "←", right: "→", up: "↑", down: "↓", tab: "⇥", click: " click", middle: "Middle" };
 
 const keyLabel = (key) => {
   if (!key) return "none";
@@ -72,7 +78,6 @@ const keymapOf = (overrides) => {
   return keymap;
 };
 
-const NPM_SERVERS = ["@vtsls/language-server", "@vue/language-server", "@vue/typescript-plugin", "bash-language-server"];
 const TOFU_LS_VERSION = "0.5.3";
 const INSTALL_TOFU_LS = [
   'set -e; dir=$(mktemp -d); cd "$dir"',
@@ -83,15 +88,50 @@ const INSTALL_TOFU_LS = [
   'tar -xzf "$archive"; mkdir -p "$1/bin"; mv tofu-ls "$1/bin/tofu-ls"; cd /; rm -rf "$dir"',
 ].join("\n");
 
+// A server: what runs it (`command`), what installs it (`install`, and `package` for npm), where it works (`workspace`), and what is
+// particular to it, if anything:
+//   prepare(view, { command, cwd, configured }) -> { command, settings, options }: another command to run, the settings it asks for
+//     (`workspace/configuration`) and its initialization options (the settings, when not given); `configured` is a command from the config;
+//   connected(view, client): once it is running, before it is initialized.
+const npmServer = (pkg, bin, ...args) => ({ package: pkg, command: () => [`${SERVERS_DIR()}/node_modules/.bin/${bin}`, ...args], install: "npm" });
+
+// A repository with its own postgres-language-server.jsonc keeps it (its database, its lints); the others get the mod's, which leaves
+// the syntax errors (postgres/postgres-language-server.jsonc).
+const postgresConfig = async (_view, { command, cwd, configured }) => {
+  if (configured || (await exec("test", ["-f", `${cwd}/postgres-language-server.jsonc`])).code === 0) return {};
+  return { command: [...command, `--config-path=${MOD_DIR()}/postgres`] };
+};
+
 const SERVERS = {
-  python: { command: () => ["uvx", "ty", "server"] },
-  rust: { command: () => ["rust-analyzer"], install: "rustup", workspace: "Cargo.toml" },
+  python: {
+    command: () => ["uvx", "ty", "server"],
+    async prepare(view, { command }) {
+      const venv = await view.findVenv();
+      if (!venv) return {};
+      return { command: ["env", `VIRTUAL_ENV=${venv}`, ...command], settings: { python: { pythonPath: `${venv}/bin/python` } } };
+    },
+  },
+  rust: {
+    command: () => ["rust-analyzer"],
+    install: "rustup",
+    workspace: "Cargo.toml",
+    prepare: (_view, { cwd }) => {
+      const settings = { "rust-analyzer": { linkedProjects: [`${cwd}/Cargo.toml`] } };
+      return { settings, options: settings["rust-analyzer"] };
+    },
+  },
   go: { command: () => ["gopls"] },
   opentofu: { command: () => [`${SERVERS_DIR()}/bin/tofu-ls`, "serve"], install: "tofu-ls" },
-  typescript: { command: () => [`${SERVERS_DIR()}/node_modules/.bin/vtsls`, "--stdio"], install: "npm" },
-  vue: { command: () => [`${SERVERS_DIR()}/node_modules/.bin/vue-language-server`, "--stdio"], install: "npm" },
-  bash: { command: () => [`${SERVERS_DIR()}/node_modules/.bin/bash-language-server`, "start"], install: "npm" },
+  typescript: { ...npmServer("@vtsls/language-server", "vtsls", "--stdio"), prepare: () => ({ settings: typescriptSettings() }) },
+  vue: { ...npmServer("@vue/language-server", "vue-language-server", "--stdio"), connected: (view, client) => view.relayToTypescript(client) },
+  bash: npmServer("bash-language-server", "bash-language-server", "start"),
+  dockerfile: npmServer("dockerfile-language-server-nodejs", "docker-langserver", "--stdio"),
+  compose: npmServer("@microsoft/compose-language-service", "docker-compose-langserver", "--stdio"),
+  postgres: { ...npmServer("@postgres-language-server/cli", "postgres-language-server", "lsp-proxy"), prepare: postgresConfig },
 };
+
+// What `npm install` fetches: the servers' packages, and the Vue plugin that vtsls loads (typescriptSettings), which has no server of its own.
+const NPM_SERVERS = [...new Set([...Object.values(SERVERS).map((spec) => spec.package), "@vue/typescript-plugin"])].filter(Boolean);
 
 const typescriptSettings = () => ({
   vtsls: {
@@ -124,6 +164,7 @@ const LANGUAGES = {
   tf: { servers: ["opentofu"], id: "opentofu" },
   tofu: { servers: ["opentofu"], id: "opentofu" },
   tfvars: { servers: ["opentofu"], id: "opentofu-vars" },
+  sql: { servers: ["postgres"], id: "sql" },
   ts: TYPESCRIPT("typescript"),
   mts: TYPESCRIPT("typescript"),
   cts: TYPESCRIPT("typescript"),
@@ -146,7 +187,29 @@ const completionItems = (answer) => (Array.isArray(answer) ? answer : answer?.it
 
 const extensionOf = (path) => (/\.([^./]+)$/.exec(path)?.[1] ?? "").toLowerCase();
 
+const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdx"]);
+const isMarkdown = (path) => MARKDOWN_EXTENSIONS.has(extensionOf(path));
+
+// A link of a Markdown file as a path of the repository: relative to the file's folder, or to the root when it starts with "/".
+// Null for an anchor, an address, or a path that leaves the repository.
+const linkedPath = (from, url) => {
+  let target = String(url ?? "").split(/[#?]/)[0];
+  try { target = decodeURIComponent(target); } catch { /* keep it as written */ }
+  if (!target || /^[a-z][a-z0-9+.-]*:/i.test(target)) return null;
+  const parts = target.startsWith("/") ? [] : from.split("/").slice(0, -1);
+  for (const part of target.split("/")) {
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else if (part && part !== ".") parts.push(part);
+  }
+  return parts.length ? parts.join("/") : null;
+};
+
 const shebangOf = (text) => /^#!\S*?\b(?:env\s+)?(sh|bash|zsh|dash|ksh)\b/.exec(text)?.[1] ?? null;
+
+// By file name first (a Dockerfile has no extension), then by extension, then by the shebang of a script.
+const languageOf = (path, text) => dockerLanguage(basename(path)) ?? LANGUAGES[extensionOf(path)] ?? (shebangOf(text) ? SHELL : null);
 
 const FIND_LIMIT = 2000;
 const GREP_LIMIT = 5000;
@@ -393,6 +456,7 @@ export default class Code extends View {
     this.peek = null;
     this.peekAt = null;
     cx.timer.every(200, () => this.updatePeek());
+    cx.timer.every(100, () => this.syncPreview());
     this.resizing = null;
     this.references = null;
     this.handle = cx.focus_handle();
@@ -426,6 +490,7 @@ export default class Code extends View {
     this.commentInput.on("submit", () => this.addComment());
     this.treeScroll = ScrollHandle.new();
     this.tabScroll = ScrollHandle.new();
+    this.pointerModifiers = null;
     this.servers = new Map();
     this.installs = new Map();
     this.serverStatus = {};
@@ -467,8 +532,10 @@ export default class Code extends View {
       this.agentName = this.config.agentName ?? agentLabel(agent[0]);
       this.agent = new AgentSession(this.root, agent, (ms) => this.cx.sleep(ms));
       this.loadChanges();
-      if (props()?.path) await this.open(props().path, props().line ? { line: props().line - 1, character: 0 } : null);
-      else cx.timer.after(50, () => this.finder.focus());
+      if (props()?.path) {
+        await this.open(props().path, props().line ? { line: props().line - 1, character: 0 } : null);
+        if (props().preview && this.current && isMarkdown(this.current.path)) this.current.preview = true;
+      } else cx.timer.after(50, () => this.finder.focus());
       this.redraw();
     });
   }
@@ -750,6 +817,7 @@ export default class Code extends View {
       if (!relevant.length) continue;
       await this.cx.sleep(300);
       await this.reloadFromDisk(relevant.includes(root) ? null : new Set(relevant));
+      this.refreshFiles().catch(() => {});
       this.loadChanges();
       if (this.mode === "search" && this.grepInput.value() && !this.grep.running) this.queueGrep(0);
     }
@@ -1417,12 +1485,36 @@ export default class Code extends View {
       for (const document of this.documents.values()) this.paintComments(document);
       this.message = `${saved.length} comment${saved.length > 1 ? "s" : ""} kept from last time · ${this.hint("send")} sends them to ${this.agentName}`;
     }
-    const listed = await exec("git", ["-C", this.root, "ls-files", "--cached", "--others", "--exclude-standard"]);
-    this.files = listed.code === 0 ? listed.stdout.split("\n").filter(Boolean) : [];
+    this.setFiles((await this.listFiles()) ?? []);
+  }
+
+  // The repository's files that exist on disk, or null when git can't list them. A file deleted from the working tree is
+  // still in the index: left in the list, it can't be opened ("Cannot read").
+  async listFiles() {
+    const [listed, deleted] = await Promise.all([
+      exec("git", ["-C", this.root, "ls-files", "--cached", "--others", "--exclude-standard"]),
+      exec("git", ["-C", this.root, "ls-files", "--deleted"]).catch(() => null),
+    ]);
+    if (listed.code !== 0) return null;
+    const gone = new Set(deleted?.code === 0 ? deleted.stdout.split("\n").filter(Boolean) : []);
+    return listed.stdout.split("\n").filter((path) => path && !gone.has(path));
+  }
+
+  setFiles(files) {
+    this.files = files;
     this.lowered = this.files.map((path) => path.toLowerCase());
     this.tree = buildTree(this.files);
     this.search = { query: "", candidates: [], results: [] };
     this.refreshSearch();
+  }
+
+  // A file created or deleted while the editor is open (by an agent, say) comes into the list or leaves it.
+  async refreshFiles() {
+    if (this.isRepo === false) return;
+    const files = await this.listFiles();
+    if (!files || (files.length === this.files.length && files.every((path, index) => path === this.files[index]))) return;
+    this.setFiles(files);
+    this.redraw();
   }
 
   refreshSearch() {
@@ -1523,7 +1615,7 @@ export default class Code extends View {
     if (!document) return;
     if (document.dirty && !document.closeArmed) {
       document.closeArmed = true;
-      this.message = `${basename(path)} has unsaved changes: ${this.hint("save")} to save, ${this.hint("close")} again to close`;
+      this.message = `${basename(path)} has unsaved changes: ${this.hint("save")} to save, ${this.hint("close")} or middle click again to close`;
       this.redraw();
       return;
     }
@@ -2018,9 +2110,9 @@ export default class Code extends View {
 
   createDocument(path, text) {
     const extension = extensionOf(path);
-    const language = LANGUAGES[extension] ?? (shebangOf(text) ? SHELL : null);
+    const language = languageOf(path, text);
     const state = EditorState.new({ language: language?.syntax ?? extension, value: text, font_family: MONO });
-    const document = { path, uri: fileUri(path), state, saved: text, dirty: false, version: 1, diagnostics: [], diagnosticsBy: new Map(), language };
+    const document = { path, uri: fileUri(path), state, saved: text, dirty: false, version: 1, diagnostics: [], diagnosticsBy: new Map(), language, preview: false, previewLine: null };
     state.on("change", () => {
       if (document.diff && !document.syncing) this.liveDiff(document);
       document.version += 1;
@@ -2062,6 +2154,7 @@ export default class Code extends View {
         return null;
       }
       : undefined;
+    const definitionAnswer = firstAnswer("definitionProvider", "textDocument/definition");
     const completers = able("completionProvider");
     const options = {
       uri: document.uri,
@@ -2071,11 +2164,20 @@ export default class Code extends View {
           const answers = await Promise.all(completers.map((server) => server.client
             .request("textDocument/completion", { ...at(request), context: contextFor(request.context, server) })
             .catch(() => null)));
-          return { isIncomplete: answers.some((answer) => answer?.isIncomplete), items: answers.flatMap(completionItems) };
+          const items = answers.flatMap(completionItems);
+          const snippets = items.some((item) => item.insertTextFormat === 2);
+          const line = snippets ? document.state.value().split("\n")[request.position.line] ?? "" : "";
+          const indent = /^[ \t]*/.exec(line)[0];
+          return {
+            isIncomplete: answers.some((answer) => answer?.isIncomplete),
+            items: snippets ? items.map((item) => plainCompletion(item, indent, document.language.indent)) : items,
+          };
         }
         : undefined,
       hover: able("hoverProvider").length ? (request) => this.hoverWithValue(document, firstAnswer("hoverProvider", "textDocument/hover"), firstAnswer("definitionProvider", "textDocument/definition"), request) : undefined,
-      definition: firstAnswer("definitionProvider", "textDocument/definition"),
+      definition: definitionAnswer
+        ? (request, cx) => (usesChord(this.pointerModifiers) ? null : definitionAnswer(request, cx))
+        : undefined,
       show_document: (params) => this.open(uriPath(params.uri), params.selection),
     };
     document.lspOptions = options;
@@ -2177,8 +2279,9 @@ export default class Code extends View {
     const cwd = this.workspaceOf(spec);
     try {
       if (!configured && spec.install) await this.install(name, spec.install, command[0], cwd);
-      const venv = name === "python" ? await this.findVenv() : null;
-      if (venv) command = ["env", `VIRTUAL_ENV=${venv}`, ...command];
+      const prepared = (await spec.prepare?.(this, { command, cwd, configured: Boolean(configured) })) ?? {};
+      command = prepared.command ?? command;
+      const settings = prepared.settings ?? {};
       this.setStatus(name, "starting");
       const client = await launch({
         bridge: `${MOD_DIR()}/lsp-bridge.mjs`,
@@ -2189,14 +2292,8 @@ export default class Code extends View {
       });
       client.on("textDocument/publishDiagnostics", ({ uri, diagnostics }) => this.showDiagnostics(name, uri, diagnostics));
       client.on("$/closed", () => this.setStatus(name, "stopped"));
-      if (name === "vue") await this.relayToTypescript(client);
-      const settings = name === "typescript"
-        ? typescriptSettings()
-        : name === "rust"
-          ? { "rust-analyzer": { linkedProjects: [`${cwd}/Cargo.toml`] } }
-          : venv ? { python: { pythonPath: `${venv}/bin/python` } } : {};
-      const initializationOptions = name === "rust" ? settings["rust-analyzer"] : settings;
-      const capabilities = await client.initialize(this.root, (section) => lookup(settings, section), initializationOptions);
+      await spec.connected?.(this, client);
+      const capabilities = await client.initialize(this.root, (section) => lookup(settings, section), prepared.options ?? settings);
       client.notify("workspace/didChangeConfiguration", { settings });
       this.setStatus(name, "ready");
       return { name, client, capabilities };
@@ -2531,6 +2628,11 @@ export default class Code extends View {
           .when(this.copiedPath === document.path, (el) => el.text_color(CHANGE_COLORS.added))
           .on_mouse_down("left", stop).on_click((_e, cx) => this.copyPath(document, cx))
           .child(this.copiedPath === document.path ? "✓ copied" : "⧉ copy"))
+        .when(isMarkdown(document.path), (el) => el.child(div().id("toggle-preview").flex_none().px(5).rounded(4).cursor_pointer()
+          .hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .when(document.preview, (st) => st.bg(t.selected).text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click(() => this.togglePreview())
+          .child("◧ preview")))
         .when(this.back.length > 0, (el) => el.child(div().child(`${this.hint("back")} back`)))
         .when(this.forward.length > 0, (el) => el.child(div().child(`${this.hint("forward")} forward`))))
       .when(this.findOpen, (el) => el.child(this.findBar(t)))
@@ -2541,10 +2643,59 @@ export default class Code extends View {
         .when(Boolean(this.composer?.error), (el) => el.child(div().flex_shrink_1().min_w(0).max_w(420).truncate().text_size(11).text_color(CHANGE_COLORS.deleted).child(`not posted: ${this.composer.error}`)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(this.composer?.reply ? `⏎ post on ${this.review?.name ?? "the MR"} · Esc cancel` : "⏎ add · Esc cancel"))))
       .when(Boolean(this.peek) && !this.diffVisible(document), (el) => el.child(this.peekPanel(t)))
-      .child(div().flex().flex_col().flex_1().min_h(0).min_w(0)
-        .on_mouse_up("right", () => this.cx.timer.after(0, () => this.findReferences()))
-        .child(Editor.new(this.activeState(document)).flex_1().min_h(0)))
+      .child(h_flex().flex_1().min_h(0).min_w(0).items_stretch()
+        .child(div().flex().flex_col().flex_1().min_h(0).min_w(0)
+          .on_mouse_up("right", () => this.cx.timer.after(0, () => this.findReferences()))
+          .on_mouse_move((e) => { this.pointerModifiers = e.modifiers; })
+          .on_mouse_down("left", (e) => { this.pointerModifiers = e.modifiers; })
+          .on_mouse_up("left", (e) => {
+            this.pointerModifiers = e.modifiers;
+            if (usesChord(e.modifiers)) this.cx.timer.after(0, () => this.findReferences());
+          })
+          .child(Editor.new(this.activeState(document)).flex_1().min_h(0)))
+        .when(document.preview && isMarkdown(document.path), (el) => el.child(this.previewPane(t, document))))
       .when(Boolean(this.references), (el) => el.child(this.referencesPanel(t)));
+  }
+
+  togglePreview() {
+    const document = this.current;
+    if (!document || this.commit || !isMarkdown(document.path)) return;
+    document.preview = !document.preview;
+    this.focusActive(document);
+    this.redraw();
+  }
+
+  // The Markdown of the file as the editor holds it (unsaved edits included), drawn beside the editor and redrawn on each change.
+  // With a Herdr that has `scroll_to_line`, it keeps the line at the top of the editor at the top of the preview.
+  previewPane(t, document) {
+    const text = document.state.value();
+    let view = null;
+    if (text.trim()) {
+      view = TextView.markdown(`preview:${document.path}`, text).selectable().scrollable()
+        .on_link_click((url, cx) => this.openPreviewLink(document, url, cx));
+      if (typeof view.scroll_to_line === "function" && document.previewLine != null) view = view.scroll_to_line(document.previewLine);
+    }
+    return v_flex().id("markdown-preview").flex_1().min_w(0).min_h(0).border_l(1).border_color(t.border).px(24).py(12)
+      .child(div().size_full().max_w(880).child(view ?? div().text_color(t.dim).child("Nothing to preview")));
+  }
+
+  // The editor doesn't tell when it scrolls, so the line at its top is asked for while a preview is open.
+  syncPreview() {
+    const document = this.current;
+    if (!document?.preview || this.diffVisible(document) || typeof document.state.first_visible_line !== "function") return;
+    const line = document.state.first_visible_line();
+    if (line == null || line === document.previewLine) return;
+    document.previewLine = line;
+    this.redraw();
+  }
+
+  openPreviewLink(document, url, cx) {
+    if (/^https?:/i.test(url ?? "")) {
+      cx.open_url(url);
+      return;
+    }
+    const path = linkedPath(this.relative(document.path), url);
+    if (path) this.open(path, null);
   }
 
   copyPath(document, cx) {
@@ -2569,6 +2720,11 @@ export default class Code extends View {
           .when(active, (el) => el.bg(t.selected))
           .when(!active, (el) => el.hover((s) => s.bg(t.hover)))
           .on_mouse_down("left", stop).on_click(() => this.open(path, null))
+          .on_mouse_down("middle", stop)
+          .on_mouse_up("middle", (_e, cx) => {
+            cx.stop_propagation();
+            this.closeTab(path);
+          })
           .child(iconElement(fileIcon(path), t.dim))
           .child(div().child(basename(path)))
           .child(div().id(`close:${path}`).w(16).h(16).flex().items_center().justify_center().rounded(4).text_size(11)
