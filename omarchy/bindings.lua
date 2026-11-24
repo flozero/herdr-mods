@@ -36,11 +36,3 @@ for _, keys in ipairs({
 }) do
   hl.unbind(keys)
 end
-
--- cmd-1..9 select a tab: the workspaces move to SUPER + ALT + 1..9, 0 (where "Switch to group window" was).
-for workspace = 1, 10 do
-  local key = "code:" .. tostring(workspace + 9)
-  hl.unbind("SUPER + " .. key)
-  hl.unbind("SUPER + ALT + " .. key)
-  o.bind("SUPER + ALT + " .. key, "Switch to workspace " .. workspace, o.workspaces.focus(workspace))
-end

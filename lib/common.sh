@@ -71,6 +71,32 @@ os.replace(target + ".tmp", target)
 PY
 }
 
+# drop_keys <section> "<key> <action>"...: a key an earlier version of these installers added is taken out when it still has
+# that action; one you changed is kept.
+drop_keys() {
+  mkdir -p "$dest"
+  python3 -I - "$dest/keys.json" "$@" <<'PY'
+import json, os, sys
+
+target, section, *drops = sys.argv[1:]
+if not os.path.exists(target):
+    sys.exit(0)
+mine = json.load(open(target))
+have = mine.get(section, {})
+for drop in drops:
+    key, action = drop.split(" ")
+    if have.get(key) == action:
+        del have[key]
+        print(f"  key {section} {key} removed (was {action})")
+    elif key in have:
+        print(f"  key {section} {key} kept as {have[key]}")
+with open(target + ".tmp", "w") as f:
+    json.dump(mine, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(target + ".tmp", target)
+PY
+}
+
 keep_webview_keys() {
   mkdir -p "$dest"
   python3 -I - "$dest/settings.json" "$@" <<'PY'
