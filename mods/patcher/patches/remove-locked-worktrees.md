@@ -35,10 +35,12 @@ In `mods/worktree` → `my-worktree` (Remove worktree):
 - `render()`: the `.when(remove && this.unpushed.length > 0, …)` warning; the lock warning
   goes after it.
 
-Since Herdr's master after 0.1.16, `remove()` first finds the worktree in `git worktree list`
-and refuses a locked one with "This worktree is locked: <reason>". This patch keeps the first
-check and replaces the refusal with the second Enter, and the space closes once the checkout is
-gone (as in Herdr's master).
+Since Herdr 0.1.17, `remove()` reads `git worktree list --porcelain` and refuses a locked
+worktree: `const lock = checkout?.find(…)` followed by
+`if (lock) return lock === "locked" ? "This worktree is locked." : …;`. This patch replaces
+those two lines with the second Enter (`list` and `checkout` stay as Herdr has them, and the
+`git worktree list` error still stops the removal). The space closes once git has removed the
+checkout, or before it on Windows, as in Herdr.
 
 ## How to check it works
 

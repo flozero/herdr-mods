@@ -55,8 +55,10 @@ In `mods/worktree` → `my-worktree`:
 - `create()`: ``const path = `${this.root}/${this.repo.name}/${slug(branch)}`;``, then after
   `git worktree add`: `const p = props();`, the "Leave spaces unnamed…" comment and
   `run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });`.
-- `remove()`: `if (changed) return "It changed since this opened. Enter again removes it anyway.";`,
-  the teardown goes right after it, before the space is closed.
+- `remove()`: `if (changed) return "It changed since this opened. Enter again removes it anyway.";`
+  is followed by the `git worktree list` read and the refusal of a locked worktree
+  (`if (lock) return lock === "locked" ? …;`). The teardown goes right after that, before the
+  `// Git on a remote Windows machine …` line, so before the space is closed.
 - `render()`: the Remove text ending "The branch stays.", the New one starting
   "A new space on a checkout in ${tilde(this.root, this.userHome)}/${r.name}/.",
   `const blocked = …`, `.child(div().text_color(t.muted).child(detail))` and

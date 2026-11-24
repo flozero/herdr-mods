@@ -1,6 +1,6 @@
 diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
---- a/mods/worktree/main.js	2026-11-19 13:04:03
-+++ b/mods/worktree/main.js	2026-11-19 13:04:03
+--- a/mods/worktree/main.js	2026-11-23 21:45:02.626491013 -0500
++++ b/mods/worktree/main.js	2026-11-23 21:45:17.755481570 -0500
 @@ -22,6 +22,88 @@
    if (!path.startsWith("/") && !/^[A-Za-z]:\//.test(path)) throw new Error("worktrees.directory must be an absolute path or start with ~/.");
    return path.replace(/\/+$/, "");
@@ -142,9 +142,9 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      return "";
    }
  
-@@ -256,7 +352,17 @@
-     if (!checkout) return "Git could not find this worktree.";
-     const lock = checkout.find((field) => field === "locked" || field.startsWith("locked "));
+@@ -255,7 +351,17 @@
+       .find(([path]) => path === `worktree ${this.repo.top}`);
+     const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
      if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 -
 +    const steps = this.skipTeardown ? [] : this.scripts("teardown");
@@ -161,7 +161,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      // Git on a remote Windows machine reports a drive-letter or UNC path.
      const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
      const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
-@@ -363,9 +469,13 @@
+@@ -362,9 +468,13 @@
            : remove
              ? !r.linked
                ? "This is the repository's main checkout, not a worktree."
@@ -177,7 +177,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
      return v_flex()
        .id("worktree")
        .track_focus(this.handle)
-@@ -377,6 +487,7 @@
+@@ -376,6 +486,7 @@
        .text_size(13)
        .child(div().font_semibold().text_color(t.foreground).child(title))
        .child(div().text_color(t.muted).child(detail))
@@ -185,7 +185,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
        .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
        .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
        .when(!remove && !blocked, (el) =>
-@@ -392,6 +503,7 @@
+@@ -391,6 +502,7 @@
              .text_color(t.foreground),
          ),
        )

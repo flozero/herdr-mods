@@ -1,0 +1,237 @@
+diff -ru a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-19 13:05:20
++++ b/mods/menu/main.js	2026-11-19 13:05:20
+@@ -113,7 +113,7 @@
+     const it = items(props(), this.git)[i];
+     if (!it) return;
+     closeOverlay(props()?.overlay);
+-    if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
++    if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : it[2].action === "new" ? { width: 440, height: 400 } : { width: 440, height: 260 }), props: it[2] });
+     else run(it[1], it[2]);
+   }
+ 
+diff -ru a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-19 13:05:20
++++ b/mods/new-menu/main.js	2026-11-19 13:05:20
+@@ -67,7 +67,7 @@
+         .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
+       .child(div().h(1).mx(4).my(5).bg(t.border))
+       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), shortcut("space.new")))
+-      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 460, height: 280, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
++      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 460, height: 400, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
+       .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
+   }
+ }
+diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-19 13:05:20
++++ b/mods/worktree/main.js	2026-11-19 13:05:20
+@@ -78,6 +78,7 @@
+     setup: [...command(mine.setup, "worktrees.setup"), ...command(here.setup, from("setup"))],
+     teardown: [...command(here.teardown, from("teardown")), ...command(mine.teardown, "worktrees.teardown")],
+     deleteBranch: flag(here.deleteBranch, from("deleteBranch")) ?? flag(mine.deleteBranch, "worktrees.deleteBranch") ?? false,
++    branchPrefix: typeof mine.branchPrefix === "string" ? mine.branchPrefix : "",
+   };
+ }
+ 
+@@ -226,6 +227,13 @@
+   setShared("worktree-sync.claims", Object.fromEntries([...claims, [branch, now]]));
+ }
+ 
++const NAMING = "Name a git branch after the deliverable this task asks for: what will exist or be changed when it is done. " +
++  "Leave out how the work gets done (investigating, planning, testing, reviewing, asking first). " +
++  "Start with the verb of the deliverable (create, add, fix, remove, rename, update...); never with a verb for a step (investigate, explore, plan, review, check). " +
++  "Reply with only the name: 2 to 5 lowercase words joined by hyphens, at most 40 characters, no prefix, no quotes.";
++const toSlug = (text) => (text.trim().split("\n").pop() ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
++import { checking } from "herdr";
++
+ export default class Worktree extends View {
+   init(_props, cx) {
+     this.on = this.space()?.machine;
+@@ -237,12 +245,23 @@
+     this.input = InputState.new({ value: this.text, placeholder: this.opening ? "filter worktrees" : "branch name" });
+     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; this.at = 0; cx.notify(); });
+     this.input.on("submit", (_e, cx) => this.go(cx));
+-    this.inputFocused = true;
++    this.inputFocused = this.opening || Boolean(props()?.branch);
+     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
+     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
++    this.message = InputState.new({ placeholder: "first message to Claude (optional)" });
++    this.message.on("change", (_e, cx) => this.suggest(cx));
++    this.message.on("submit", (_e, cx) => this.go(cx));
++    this.spaceName = InputState.new({ placeholder: "space name (optional)" });
++    this.spaceName.on("submit", (_e, cx) => this.go(cx));
++    this.fieldFocus = "";
++    for (const [field, state] of [["message", this.message], ["spaceName", this.spaceName]]) {
++      state.on("focus", (_e, cx) => { this.fieldFocus = field; cx.notify(); });
++      state.on("blur", (_e, cx) => { if (this.fieldFocus === field) this.fieldFocus = ""; cx.notify(); });
++    }
++    this.naming = 0;
+     this.handle = cx.focus_handle();
+     this.handle.focus(); // the root is mounted from the first frame: keep the keyboard here while loading
+-    if (props()?.action !== "remove") this.input.focus();
++    if (props()?.action !== "remove") this.first().focus();
+     this.busy = false;
+     this.error = "";
+     this.repo = undefined; // undefined: looking, null: not in git
+@@ -276,7 +295,7 @@
+         // done, so the keyboard must move there now — a focus call made while
+         // loading lands on nothing and the dialog stays keyboard-dead.
+         this.handle.focus();
+-        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
++        if (props().action !== "remove") cx.timer.after(100, () => this.first().focus());
+         if (props().branch) await this.work(cx);
+       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
+     });
+@@ -293,9 +312,73 @@
+ 
+   go(cx) {
+     if (this.busy || !this.repo) return;
++    if (!this.opening && props()?.action !== "remove" && !this.text.trim() && this.suggesting) {
++      this.pending = true;
++      return cx.notify();
++    }
+     cx.spawn(async (cx) => this.work(cx));
+   }
+ 
++  first() {
++    return this.opening || props()?.branch ? this.input : this.message;
++  }
++
++  typedBranch() {
++    return Boolean(this.text.trim()) && this.text !== this.auto;
++  }
++
++  suggest(cx) {
++    const seq = ++this.naming;
++    this.error = "";
++    cx.notify();
++    if (checking() || this.typedBranch()) return;
++    cx.timer.after(700, (cx) => {
++      const prompt = this.message.value().trim();
++      if (seq !== this.naming || !prompt) return;
++      this.suggesting = true;
++      cx.notify();
++      cx.spawn(async (cx) => {
++        let name = "";
++        try {
++          const r = await exec("claude", ["-p", "--model", "haiku", "--tools", "", "--no-session-persistence", "--strict-mcp-config",
++            "--setting-sources", "", "--system-prompt", NAMING, "--", prompt], { cwd: home(), timeout: 30_000 });
++          const words = r.code === 0 ? toSlug(r.stdout) : "";
++          if (words) name = `${this.worktrees?.branchPrefix ?? ""}${words}`;
++        } catch {}
++        if (seq !== this.naming) return;
++        this.suggesting = false;
++        if (name && !this.typedBranch()) {
++          this.auto = name;
++          this.text = name;
++          this.input.set_value(name);
++        }
++        if (this.pending) {
++          this.pending = false;
++          this.go(cx);
++        }
++        cx.notify();
++      });
++    });
++  }
++
++  field(state, focused, t) {
++    return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground);
++  }
++
++  async base() {
++    const head = await git(this.repo.main, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], this.on);
++    if (!head.ok) return "HEAD";
++    await git(this.repo.main, ["fetch", "--quiet", "origin", head.out.replace(/^origin\//, "")], this.on, 120_000);
++    return head.out;
++  }
++
++  async ensureRepoSpace(cx) {
++    const find = () => spaces().find((s) => (s.machine ?? null) === (this.on ?? null) && [s.folder, place(s)].includes(this.repo.main));
++    if (find()) return;
++    run("space.new", { name: this.repo.name, folder: this.repo.main, machine: this.on ?? "" });
++    for (let n = 0; n < 30 && !find(); n++) await new Promise((resolve) => cx.timer.after(100, () => resolve()));
++  }
++
+   scripts(kind) {
+     return onWindows(this.userHome) ? [] : this.worktrees?.[kind] ?? [];
+   }
+@@ -312,7 +395,7 @@
+     this.error = "";
+     cx.notify();
+     if (!remove) claim(this.text.trim());
+-    try { this.error = remove ? await this.remove() : await this.create(); }
++    try { this.error = remove ? await this.remove() : await this.create(cx); }
+     catch (error) { this.error = String(error); }
+     this.busy = false;
+     if (!this.error && this.branch) await this.deleteBranch();
+@@ -320,19 +403,21 @@
+     cx.notify();
+   }
+ 
+-  async create() {
++  async create(cx) {
+     const branch = this.text.trim();
+     if (!branch) return "Type a branch name.";
+     const path = `${this.worktrees.dir}/${slug(branch)}`;
+     const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
+-    const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
++    const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "--no-track", "-b", branch, path, await this.base()];
+     const r = await git(this.repo.top, add, this.on, 600_000);
+     if (!r.ok) return r.err || "git worktree add failed.";
+     const p = props();
++    const task = p.task ?? (this.message.value().trim() || undefined);
++    const agent = p.argv ?? (task ? ["claude"] : undefined);
+     const setup = this.scripts("setup");
+-    const argv = setup.length ? withSetup(setup, { repo: this.repo.main, path, branch }, p.argv) : p.argv;
+-    // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
+-    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv });
++    const argv = setup.length ? withSetup(setup, { repo: this.repo.main, path, branch }, agent) : agent;
++    if (p.repoSpace) await this.ensureRepoSpace(cx);
++    run("space.new", { name: this.spaceName.value().trim(), folder: path, machine: this.on ?? "", tab: p.tab, argv, task });
+     return "";
+   }
+ 
+@@ -398,6 +483,13 @@
+ 
+   key(e, cx) {
+     if (e.key === "escape") return this.close();
++    if (e.key === "tab" && !this.opening && props()?.action !== "remove") {
++      const order = [this.message, this.input, this.spaceName];
++      const at = [this.fieldFocus === "message", this.inputFocused, this.fieldFocus === "spaceName"].indexOf(true);
++      order[(at + (e.modifiers?.shift ? order.length - 1 : 1) + order.length) % order.length].focus();
++      cx.stop_propagation();
++      return;
++    }
+     if (this.opening) {
+       const n = this.shown().length;
+       if (e.key === "enter") this.open(this.shown()[this.at]);
+@@ -491,7 +583,7 @@
+             ? !r.linked
+               ? "This is the repository's main checkout, not a worktree."
+               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. ${this.branch ? `Deletes branch ${this.branch.name} too.` : "The branch stays."}`
+-            : `A new space on a checkout in ${tilde(this.worktrees.dir, this.userHome)}/. A branch that exists is checked out; a new one starts from here.`;
++            : `A new space on a checkout in ${tilde(this.worktrees.dir, this.userHome)}/. A branch that exists is checked out; a new one starts from origin's default branch.`;
+     const blocked = !r || (remove && !r.linked);
+     const steps = this.worktrees?.[remove ? "teardown" : "setup"] ?? [];
+     const runs = !r || blocked || !steps.length ? ""
+@@ -513,7 +605,7 @@
+       .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
+       .when(remove && this.locked !== null, (el) => el.child(div().text_color(t.blocked).child(`It's locked${lockedBy(this.locked)}: removing it overrides the lock.`)))
+       .when(!remove && !blocked, (el) =>
+-        el.child(
++        el.child(this.field(this.message, this.fieldFocus === "message", t)).child(
+           Input.new(this.input)
+             .h(32)
+             .px(10)
+@@ -523,7 +615,9 @@
+             .border_color(this.inputFocused ? t.accent : t.input)
+             .bg(t.background)
+             .text_color(t.foreground),
+-        ),
++        )
++          .child(this.field(this.spaceName, this.fieldFocus === "spaceName", t))
++          .when(Boolean(this.suggesting), (el) => el.child(div().text_size(12).text_color(t.dim).child("Naming the branch from the message…"))),
+       )
+       .when(remove && Boolean(this.branch?.unpushed), (el) => el.child(div().text_color(t.blocked).child(`Branch ${this.branch.name} has commits that are on no other branch or remote: they will be lost.`)))
+       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
