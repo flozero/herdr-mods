@@ -8,9 +8,10 @@ const COPIES = [
   { from: "mods/new-menu", to: "mods/my-new-menu" },
   { from: "mods/spaces", to: "mods/my-spaces" },
   { from: "mods/tabs", to: "mods/my-tabs" },
+  { from: "mods/workspace-status", to: "mods/my-workspace-status" },
   { from: "layouts/main.json", to: "layouts/my-main.json" },
 ];
-const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix", "configurable-agent"];
+const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix", "configurable-agent", "statusbar"];
 const STACKS = ["", "0.1.16/"];
 const LAYOUT = "my-main";
 
