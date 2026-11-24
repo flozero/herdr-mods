@@ -4,6 +4,7 @@ import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile
 import { launch, fileUri, uriPath } from "./lsp.js";
 import { dockerLanguage } from "./docker.js";
 import { plainCompletion } from "./snippet.js";
+import { syntaxOf } from "./syntax.js";
 import { deleteLines, cutLines, moveLines, duplicateLines } from "./lines.js";
 import { branchDiff, workingDiff, commitGraph, commitDiff, agentLabel } from "./review/local.js";
 import { lineDiff } from "./review/diff.js";
@@ -1069,7 +1070,7 @@ export default class Code extends View {
     pushDeleted(lines.length + 1);
     const value = out.join("\n");
     if (!document.diff) {
-      const state = EditorState.new({ language: document.language?.syntax ?? extensionOf(document.path), value, font_family: MONO, folding: false });
+      const state = EditorState.new({ language: syntaxOf(basename(document.path), extensionOf(document.path), document.language), value, font_family: MONO, folding: false });
       document.diff = { state, value, deleted: out.filter(isVirtual) };
       state.on("change", () => this.syncFromDiff(document));
       this.trackTyping(document, state);
@@ -2140,7 +2141,7 @@ export default class Code extends View {
   createDocument(path, text) {
     const extension = extensionOf(path);
     const language = languageOf(path, text);
-    const state = EditorState.new({ language: language?.syntax ?? extension, value: text, font_family: MONO });
+    const state = EditorState.new({ language: syntaxOf(basename(path), extension, language), value: text, font_family: MONO });
     const document = { path, uri: fileUri(path), state, saved: text, dirty: false, version: 1, diagnostics: [], diagnosticsBy: new Map(), language, preview: false, previewLine: null };
     this.trackTyping(document, state);
     state.on("change", () => {
