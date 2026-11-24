@@ -46,6 +46,31 @@ os.replace(target + ".tmp", target)
 PY
 }
 
+# retarget_keys <section> "<key> <from> <to>"...: a key that still has the action Herdr gives it (or none) gets <to>;
+# one you changed is kept.
+retarget_keys() {
+  mkdir -p "$dest"
+  python3 -I - "$dest/keys.json" "$@" <<'PY'
+import json, os, sys
+
+target, section, *moves = sys.argv[1:]
+mine = json.load(open(target)) if os.path.exists(target) else {}
+have = mine.setdefault(section, {})
+for move in moves:
+    key, old, new = move.split(" ")
+    if have.get(key) in (None, old):
+        if have.get(key) != new:
+            print(f"  key {section} {key}: {have.get(key)} -> {new}")
+        have[key] = new
+    elif have[key] != new:
+        print(f"  key {section} {key} kept as {have[key]} (wanted {new})")
+with open(target + ".tmp", "w") as f:
+    json.dump(mine, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+os.replace(target + ".tmp", target)
+PY
+}
+
 keep_webview_keys() {
   mkdir -p "$dest"
   python3 -I - "$dest/settings.json" "$@" <<'PY'

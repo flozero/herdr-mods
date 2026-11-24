@@ -1,0 +1,38 @@
+{
+  "global": {
+    "cmd-t": "tab.new",
+    "cmd-w": "tab.close",
+    "cmd-1": "tab.select:1",
+    "cmd-2": "tab.select:2",
+    "cmd-3": "tab.select:3",
+    "cmd-4": "tab.select:4",
+    "cmd-5": "tab.select:5",
+    "cmd-6": "tab.select:6",
+    "cmd-7": "tab.select:7",
+    "cmd-8": "tab.select:8",
+    "cmd-9": "tab.select:9",
+    "cmd-shift-]": "tab.next",
+    "cmd-}": "tab.next",
+    "cmd-shift-[": "tab.prev",
+    "cmd-{": "tab.prev",
+    "cmd-alt-]": "space.next",
+    "cmd-alt-[": "space.prev",
+    "cmd-]": "agent.next",
+    "cmd-[": "agent.prev",
+    "cmd-n": "space.new",
+    "cmd-p": "mod.open:picker",
+    "cmd-d": "pane.split:right",
+    "cmd-shift-d": "pane.split:down",
+    "cmd-shift-w": "pane.close",
+    "cmd-shift-enter": "pane.zoom",
+    "cmd-alt-left": "pane.go:left",
+    "cmd-alt-right": "pane.go:right",
+    "cmd-alt-up": "pane.go:up",
+    "cmd-alt-down": "pane.go:down",
+    "cmd-shift-l": "layout.switch",
+    "cmd-b": "layout.toggle:sidebar"
+  },
+  "terminal": {
+    "cmd-f": "terminal.search"
+  }
+}
