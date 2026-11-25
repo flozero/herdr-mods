@@ -2,6 +2,7 @@ import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
 import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
+import { createHash } from "crypto";
 import * as gl from "./gitlab.js";
 import { parseDiff, onRow, excerpt, position, splitRows, splitGitDiff, gapAt, expandGap } from "./diff.js";
 import { splitDetails, gitlabLinks } from "./md.js";
@@ -50,7 +51,17 @@ const cacheDir = () => `${appHome()}/mods/gitlab-review/.cache`;
 const ignoredFile = () => `${cacheDir()}/ignored.json`;
 const seenFile = () => `${cacheDir()}/seen.json`;
 const viewedFile = () => `${cacheDir()}/viewed.json`;
-const diffHash = (text) => { let h = 0; for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0; return String(h); };
+const HASHED = new Map();
+const fileHash = (f) => {
+  const text = f.diff ?? "";
+  let hash = HASHED.get(text);
+  if (hash === undefined) {
+    hash = createHash("sha1").update(text).digest("hex");
+    if (HASHED.size > 2000) HASHED.clear();
+    HASHED.set(text, hash);
+  }
+  return hash;
+};
 const editorFile = () => `${cacheDir()}/editor.json`;
 const prefsFile = () => `${cacheDir()}/prefs.json`;
 const notesFile = () => `${cacheDir()}/local.json`;
@@ -475,7 +486,8 @@ export default class GitlabReview extends View {
     const mr = this.details[this.iid]?.mr;
     this.editorMenu = false;
     cx.notify();
-    if (!mr || this.openingEditor) return;
+    if (!mr) { this.say("Open a merge request first", cx, "error"); return; }
+    if (this.openingEditor) { this.say(`Still opening ${mr.source_branch}…`, cx); return; }
     if (this.local) {
       this.editor = app;
       cx.spawn(async (cx) => {
@@ -498,7 +510,7 @@ export default class GitlabReview extends View {
     this.say(`Opening ${mr.source_branch} in ${app}…`, cx);
     cx.spawn(async (cx) => {
       try {
-        const { path, created, main } = await branchCheckout(exec, this.top, mr.source_branch, home());
+        const { path, created, main, synced } = await branchCheckout(exec, this.top, mr.source_branch, home());
         if (created && path !== main) {
           this.say(`Setting up the worktree for ${mr.source_branch}…`, cx);
           const setup = await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: mr.source_branch });
@@ -506,7 +518,8 @@ export default class GitlabReview extends View {
         }
         const r = await this.openPath(app, path, cx, created);
         if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || `${app} didn't open`);
-        this.say(`${created ? "Worktree created: " : ""}${mr.source_branch} opened in ${app}`, cx, "success");
+        const behind = synced && synced !== "updated" && synced !== "up to date";
+        this.say(`${created ? "Worktree created: " : ""}${mr.source_branch} opened in ${app}${synced ? ` (${synced})` : ""}`, cx, behind ? "error" : "success");
       } catch (e) {
         this.say(`Couldn't open it in ${app}: ${e?.message ?? e}`, cx, "error");
       } finally {
@@ -542,14 +555,14 @@ export default class GitlabReview extends View {
   }
 
   isViewed(d, f) {
-    return this.viewed[this.viewKey(d)]?.[f.new_path] === diffHash(f.diff ?? "");
+    return this.viewed[this.viewKey(d)]?.[f.new_path] === fileHash(f);
   }
 
   toggleViewed(d, f, cx, advance = false) {
     const key = this.viewKey(d);
     const mine = { ...(this.viewed[key] ?? {}) };
     const was = this.isViewed(d, f);
-    if (was) delete mine[f.new_path]; else mine[f.new_path] = diffHash(f.diff ?? "");
+    if (was) delete mine[f.new_path]; else mine[f.new_path] = fileHash(f);
     this.viewed = { ...this.viewed, [key]: mine };
     const open = new Set(Object.keys(this.details).map(String));
     const kept = Object.fromEntries(Object.entries(this.viewed).filter(([k]) => k.startsWith("branch:") || open.has(k) || [...this.mrs, ...this.authored].some((m) => String(m.iid) === k)));
@@ -2102,6 +2115,7 @@ export default class GitlabReview extends View {
     const k = e.keystroke.replace(/(^|-)fn-/, "$1");
     if (k === "cmd-r" || k === "ctrl-r") { this.reload(cx); cx.stop_propagation(); return; }
     if (this.editorMenu && k === "escape") { this.toggleEditorMenu(cx); cx.stop_propagation(); return; }
+    if (k === "ctrl-/" || (this.shortcuts && k === "escape")) { this.toggleShortcuts(cx); cx.stop_propagation(); return; }
     if (this.peopleFocused || (this.peoplePick && k === "escape")) {
       if (this.peopleKey(k, cx)) cx.stop_propagation();
       return;
@@ -2441,7 +2455,8 @@ export default class GitlabReview extends View {
       .when(!this.iid && (this.searchOpen || Boolean(this.query)), (el) => el.child(this.searchBar(t, this.listed().length, this.mrs.length + this.authored.length + (this.merged?.length ?? 0))))
       .child(this.iid ? this.mrView(t, d) : this.listView(t))
       .child(this.footer(t))
-      .when(Boolean(this.toastText), (el) => el.child(this.toastView(t)));
+      .when(Boolean(this.toastText), (el) => el.child(this.toastView(t)))
+      .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsModal(t)));
   }
 
   localHeader(t, d) {
@@ -2563,20 +2578,53 @@ export default class GitlabReview extends View {
       .child(this.button(t, "s-close", "×", (cx) => { this.search.set_value(""); this.query = ""; this.searchOpen = false; this.refsOpen = false; this.handle.focus(); cx.notify(); }));
   }
 
+  shortcutRows() {
+    const agent = this.agentName();
+    if (this.descFocused) return [["⌘↵", "Save the description"], ["Esc", "Leave the editor (Cancel drops the changes)"]];
+    if (this.composing && this.local) return [["⌘↵", "Add to your review"], ["Esc", "Leave"]];
+    if (this.composing) return [["⌘↵", "Add to your review (pending)"], ["⌥↵", `Ask ${agent} (private)`], ["Esc", "Leave"]];
+    if (this.searchFocused) return [["Type", "Filter what's loaded"], ["Enter", "Keep the search"], ["Esc", "Clear"]];
+    const code = [["↑ ↓", "Files, or lines in the code"], ["→ / ←", "Into the code / back"], ["fn↑↓ ⌥↑↓", "8 lines"], ["⇧↑↓", "Select lines"], ["Space", "Page down"]];
+    if (this.local) {
+      return [["1–4 Tab", "Sections"], ...code, ["c", "Comment"], ["⌘↵", "Add to your review"], ["a", `Send the review to ${agent}`],
+        ["s", "Split / unified"], ["v", "Viewed"], ["d", "Edit the description"], ["⇧D", "Draft / ready"], ["e", "Editor"], ["/", "Search"], ["⌘R", "Refresh"]];
+    }
+    if (this.iid) {
+      return [["/ ⌘F", "Search (Enter lists the matches in the code)"], ["1–4 Tab ⇧Tab", "Sections"], ...code, ["c", "Comment or write"],
+        ["click", "Put the cursor on a line"], ["⇧click", "Select lines"], ["double-click", "Comment a line"],
+        ["s", "Split / unified"], ["v", "Viewed"], ["y", "Copy the file's path"], ["d", "Edit the description"], ["⇧D", "Draft / ready"],
+        ["g", `Ask ${agent}`], ["i", "Ignore"], ["o", "Open in the browser"], ["e", "Editor"], ["⇧E", "Pick the editor"], ["⌘R", "Refresh"], ["Esc", "Back"]];
+    }
+    if (this.picked().length > 1) return [["i", `Ignore or restore the ${this.picked().length} selected`], ["Esc", "Unselect"]];
+    return [["1–5 Tab ⇧Tab", "Lists"], ["p", "Pick someone"], ["/", "Search"], ["↑ ↓", "Move"], ["⇧↑↓", "Select several"],
+      ["Enter", "Open"], ["i", "Ignore or restore"], ["⌘R", "Refresh"], ["Esc", "Close"]];
+  }
+
   footer(t) {
     const s = this.flash ?? this.status;
-    const hint = this.descFocused ? "⌘↵ save the description · Esc leave the editor (Cancel drops the changes)"
-      : this.composing && this.local ? "⌘↵ add to your review · Esc leave"
-      : this.composing ? `⌘↵ add to your review (pending) · ⌥↵ ask ${this.agentName()} (private) · Esc leave`
-      : this.local && !this.searchFocused ? `1–4 / Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, ← back) · c comment, ⌘↵ add to your review · a send the review to ${this.agentName()} · s split · v viewed · d edit the description · ⇧D draft/ready · e editor · / search · ⌘R refresh`
-      : this.searchFocused ? "Type to filter what's loaded · Enter keep · Esc clear"
-      : this.iid ? `/ or ⌘F search (Enter lists the matches in the code) · 1–4 / Tab ⇧Tab sections · ↑↓ files · → into the code (↑↓ lines, fn↑↓ or ⌥↑↓ 8 lines, ⇧ select, Space page, c comment, ← back) · s split/unified · v viewed · y copy the file's path · d edit the description · ⇧D draft/ready · click a line for the cursor (⇧click to select, double-click to comment) · c write · g Ask ${this.agentName()} · i ignore · o browser · e editor (⇧E pick) · ⌘R refresh · Esc back`
-      : this.picked().length > 1 ? `${this.picked().length} selected · i ignore or restore them all · Esc unselect`
-      : "1–5 / Tab ⇧Tab lists · p pick someone · / search · ↑↓ move · ⇧↑↓ select several · Enter open · i ignore or restore · ⌘R refresh · Esc close";
     const color = s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
-      .child(div().flex_1().min_w(0).truncate().text_color(color).child(kbd(s?.text ?? hint)))
-      .child(div().flex_none().text_color(t.dim).child(this.local ? this.top ?? "" : this.user ? `@${this.user.username}` : ""));
+      .child(div().flex_1().min_w(0).truncate().text_color(color).child(kbd(s?.text ?? "")))
+      .child(div().flex_none().text_color(t.dim).child(this.local ? this.top ?? "" : this.user ? `@${this.user.username}` : ""))
+      .child(div().id("shortcuts-hint").px(6).rounded(4).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.toggleShortcuts(cx))
+        .child("Shortcuts ⌃/"));
+  }
+
+  toggleShortcuts(cx) {
+    this.shortcuts = !this.shortcuts;
+    cx.notify();
+  }
+
+  shortcutsModal(t) {
+    return div().id("shortcuts-backdrop").absolute().inset_0().flex().items_center().justify_center().bg("#0000002e")
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.toggleShortcuts(cx); })
+      .child(v_flex().id("shortcuts").w(440).max_h_full().p(14).gap(2).rounded(10).border_1().border_color(t.border).bg(t.popover).overflow_y_scrollbar()
+        .on_mouse_down("left", stop)
+        .child(div().pb(8).text_size(13).font_semibold().child("Shortcuts"))
+        .children(this.shortcutRows().map(([key, label], n) => h_flex().id(`shortcut-${n}`).h(26).gap(12).items_center()
+          .child(div().flex_1().text_size(12.5).child(label))
+          .child(div().px(6).py(1).rounded(4).bg(t.selected).font_family(MONO).text_size(11.5).child(kbd(key))))));
   }
 
   button(t, id, label, action, primary = false, enabled = true) {
@@ -3354,15 +3402,16 @@ export default class GitlabReview extends View {
         const count = threadsOf(f).length;
         const onFile = (p) => p && (p.new_line || p.old_line) && (p.new_path === f.new_path || p.old_path === f.old_path);
         const pending = d.drafts.filter((x) => onFile(x.position)).length + (this.local ? this.notes.filter((x) => onFile(x.position)).length : 0);
+        const viewed = this.isViewed(d, f);
         const posted = threadsOf(f).reduce((n, x) => n + humanNotes(x).filter((y) => y.author?.username === this.user?.username).length, 0);
         return h_flex().id(`f-${n}`).mx(4).px(8).h(28).gap(6).items_center().rounded(6).cursor_pointer()
           .when(on, (el) => el.bg(dim ? t.hover : t.selected)).hover((s) => s.bg(on ? t.selected : t.hover))
           .on_mouse_down("left", stop).on_click((_e, cx) => { this.file = n; this.jump = null; this.cursor = null; this.area = "files"; this.handle.focus(); cx.notify(); })
           .child(div().w(12).flex_none().text_size(11).font_family(MONO)
             .text_color(f.new_file ? t.done : f.deleted_file ? t.blocked : t.dim).child(fileMark(f)))
-          .child(div().id(`fv-${n}`).w(14).flex_none().text_size(11).text_color(this.isViewed(d, f) ? t.done : t.border).cursor_pointer().hover((s) => s.text_color(t.accent))
-            .on_mouse_down("left", stop).on_click((_e, cx) => this.toggleViewed(d, f, cx)).child(this.isViewed(d, f) ? "☑" : "☐"))
-          .child(div().flex_none().text_size(12).when(this.isViewed(d, f), (el) => el.text_color(t.dim)).child(parts.pop()))
+          .child(div().id(`fv-${n}`).w(14).flex_none().text_size(11).text_color(viewed ? t.done : t.border).cursor_pointer().hover((s) => s.text_color(t.accent))
+            .on_mouse_down("left", stop).on_click((_e, cx) => this.toggleViewed(d, f, cx)).child(viewed ? "☑" : "☐"))
+          .child(div().flex_none().text_size(12).when(viewed, (el) => el.text_color(t.dim)).child(parts.pop()))
           .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(parts.join("/")))
           .when(this.local && Boolean(f.state), (el) => el.children(FILE_STATE.filter(([key]) => f.state[key])
             .map(([, label, color]) => div().flex_none().text_size(10.5).text_color(t[color]).child(label))))
@@ -3526,3 +3575,4 @@ export default class GitlabReview extends View {
         .when(open, (el) => el.child(this.button(t, "c-add", this.sending ? "Saving…" : "Add to review  ⌘↵", (cx) => this.addToReview(cx), true, !empty && !this.sending))));
   }
 }
+

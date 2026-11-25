@@ -23,10 +23,12 @@ export async function branchCheckout(exec, top, branch, userHome) {
   const list = parseWorktrees(await git(top, ["worktree", "list", "--porcelain"]));
   const have = list.find((w) => w.branch === branch);
   const main = list[0]?.path ?? top;
-  if (have) return { path: have.path, created: false, main };
+  if (have) return { path: have.path, created: false, main, synced: await syncWorktree(exec, have.path, branch) };
   const local = `${main}/.claude/worktrees`;
   const root = (await exec("test", ["-d", local])).code === 0 ? local : `${userHome}/.herdr/worktrees/${main.split("/").pop()}`;
-  const path = `${root}/${slug(branch)}`;
+  const base = `${root}/${slug(branch)}`;
+  let path = base;
+  for (let n = 2; (await exec("test", ["-e", path])).code === 0; n++) path = `${base}-${n}`;
   await git(main, ["fetch", "--quiet", "origin", branch]);
   if (await ok(main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])) {
     if (await ok(main, ["merge-base", "--is-ancestor", branch, `origin/${branch}`])) await git(main, ["branch", "-f", branch, `origin/${branch}`]);
@@ -35,6 +37,18 @@ export async function branchCheckout(exec, top, branch, userHome) {
     await git(main, ["worktree", "add", "--track", "-b", branch, path, `origin/${branch}`]);
   }
   return { path, created: true, main };
+}
+
+async function syncWorktree(exec, path, branch) {
+  const run = (args) => exec("git", args, { cwd: path });
+  if ((await run(["fetch", "--quiet", "origin", branch])).code !== 0) return "not on the remote";
+  const remote = `origin/${branch}`;
+  if ((await run(["merge-base", "--is-ancestor", remote, "HEAD"])).code === 0) {
+    return (await run(["merge-base", "--is-ancestor", "HEAD", remote])).code === 0 ? "up to date" : "ahead of the remote";
+  }
+  if ((await run(["merge-base", "--is-ancestor", "HEAD", remote])).code !== 0) return "diverged from the remote";
+  if ((await run(["status", "--porcelain", "--untracked-files=no"])).stdout.trim()) return "behind the remote, with uncommitted changes";
+  return (await run(["merge", "--ff-only", "--quiet", remote])).code === 0 ? "updated" : "behind the remote, update failed";
 }
 
 export async function installedEditors(exec) {
