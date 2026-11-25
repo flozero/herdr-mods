@@ -8,7 +8,7 @@
 
 Herdr's own editor in a tab, on the focused pane's repository: a file tree (drag its edge to resize it), a file finder, language servers (completion, hover, go to definition, diagnostics), and the branch's changes against its base. A changed file opens as its diff: the whole file with its line numbers and its deleted lines (`−`, on red) between the others, added lines on green. Edit it as any file; deleted lines can't be edited. gitlab-review's Herdr editor (`e`) opens it on a merge request's worktree, in the changes view.
 
-In the changes, **Uncommitted** shows only what isn't committed yet (against `HEAD`), **All** the whole branch against its base.
+In the changes, **Uncommitted** shows only what isn't committed yet (against `HEAD`), **All** the whole branch against its base. The field above the files filters them by a regex on their path (`\.py$`); `!` in front hides the ones it matches instead (`!definitions|fixtures`).
 
 **Graph** shows the history (`git log --graph`, the branch and its base); click a commit to see its diff, click one of its files to open it, `Esc` goes back to the editor.
 
@@ -39,6 +39,8 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl-shift-enter` | publish the review on the merge request |
 | `ctrl-s` | save |
 | `ctrl-w`, middle click on a tab | close the tab (a tab with unsaved changes asks for a second one) |
+| `ctrl-z`, `cmd-z` | undo (the mod keeps the history of the real file, in the plain editor, the stacked diff and the split) |
+| `ctrl-shift-z`, `cmd-shift-z`, `ctrl-y` | redo |
 | `ctrl-d` | delete the line (every line the selection touches) |
 | `ctrl-x` | with nothing selected, cut the line (to the clipboard); with a selection it cuts that, as usual |
 | `ctrl-c`, `ctrl-v` | copy the selection, paste (as `cmd-c`, `cmd-v` on macOS) |
@@ -49,6 +51,8 @@ Select lines and comment them; send the comments to the agent working in the rep
 | `ctrl--` | go back to the previous file or place |
 | `ctrl-=`, `ctrl-+` | go forward again |
 | `ctrl-alt-down`, `ctrl-alt-up` | next, previous change in the file |
+| `ctrl-alt-s` | split or stacked diff: the old version on the left, read only, scrolling with the editor on the right (needs a Herdr with `set_scroll_top`) |
+| `ctrl-alt-[` | fold or unfold the block under the cursor (the arrows in the gutter do it too; no folding in the split) |
 | `ctrl-alt-m` | show or hide the MR comments in the code (`ctrl-k` on one replies) |
 | `ctrl-alt-r`, `ctrl-alt-f` | resolve or reopen, hide or show the MR thread under the cursor (resolved ones start hidden) |
 | `ctrl-alt-right`, `ctrl-alt-left` | next, previous tab |
@@ -66,7 +70,7 @@ The line keys work in the editor only: with the keyboard in another field (the f
 | --- | --- | --- |
 | `agent` | `["claude"]` | the agent the review starts when none works in the repository |
 | `agentName` | `"Claude"` | the name shown on messages |
-| `keys` | `{}` | `{ "<id>": "<key>" }`, the ids above (`files`, `search`, `find`, `sidebar`, `changes`, `preview`, `comment`, `send`, `publish`, `save`, `close`, `definition`, `references`, `back`, `forward`, `nextTab`, `previousTab`, `deleteLine`, `cutLine`, `moveLineUp`, `moveLineDown`, `duplicateLine`, `shortcuts`) |
+| `keys` | `{}` | `{ "<id>": "<key>" }`, the ids above (`files`, `search`, `find`, `sidebar`, `changes`, `preview`, `comment`, `send`, `publish`, `save`, `close`, `definition`, `references`, `back`, `forward`, `nextTab`, `previousTab`, `deleteLine`, `cutLine`, `moveLineUp`, `moveLineDown`, `duplicateLine`, `undo`, `redo`, `splitDiff`, `fold`, `shortcuts`) |
 | `servers` | `{}` | language server commands, over the built-in ones, by name: `python`, `rust`, `go`, `opentofu`, `typescript`, `vue`, `bash`, `dockerfile`, `compose`, `postgres` |
 | `fixOnSave` | built in | after each save: `ruff check --fix` then `ruff format` on Python (the repository's `venv`/`.venv` ruff, else the one on the `PATH`), `eslint --fix` on Vue, JavaScript and TypeScript (the closest `node_modules/.bin/eslint`); the file reloads with the fixes, the first problem left shows in the footer. `false` turns it off, `{ "<extension>": false }` for one type, `{ "<extension>": [["cmd", "arg", "{file}"]] }` runs your commands instead, from the repository |
 

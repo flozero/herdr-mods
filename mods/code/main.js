@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, TextView, v_virtual_list } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Editor, EditorState, ScrollHandle, Scrollbar, TextView, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { theme, props, focused, exec, home, appHome, readTextFile, writeTextFile, closeOverlay, run, watchFolder, shared, setShared } from "herdr";
 import { launch, fileUri, uriPath } from "./lsp.js";
 import { dockerLanguage } from "./docker.js";
@@ -47,7 +47,26 @@ const patchValue = (state, next) => {
   return true;
 };
 
+const UNDO_GROUP_MS = 800;
+const UNDO_DEPTH = 300;
+
+const ownHistoryEditor = (options) => {
+  try {
+    return EditorState.new({ ...options, history: false });
+  } catch {
+    return EditorState.new(options);
+  }
+};
+
+const firstDifference = (a, b) => {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return i;
+};
+
 const ACTIONS = [
+  { id: "undo", key: "ctrl-z", aliases: ["cmd-z"], label: "Undo", run: (view) => view.stepHistory(-1) },
+  { id: "redo", key: "ctrl-shift-z", aliases: ["cmd-shift-z", "ctrl-y"], label: "Redo", run: (view) => view.stepHistory(1) },
   { id: "files", key: "ctrl-p", label: "Find a file", run: (view) => view.focusFinder() },
   { id: "search", key: "cmd-shift-f", aliases: ["ctrl-shift-f"], label: "Find and replace in the project", run: (view) => view.startGrep() },
   { id: "sidebar", key: "ctrl-b", label: "Show or hide the sidebar", run: (view) => view.toggleSidebar() },
@@ -74,6 +93,8 @@ const ACTIONS = [
   { id: "threads", key: "ctrl-alt-m", label: "Show or hide the MR comments in the code", run: (view) => view.toggleThreads() },
   { id: "resolveThread", key: "ctrl-alt-r", label: "Resolve or reopen the MR thread under the cursor", run: (view) => view.resolveAtCursor() },
   { id: "foldThread", key: "ctrl-alt-f", label: "Hide or show the MR thread under the cursor", run: (view) => view.foldAtCursor() },
+  { id: "fold", key: "ctrl-alt-[", label: "Fold or unfold the block", run: (view) => view.toggleFold() },
+  { id: "splitDiff", key: "ctrl-alt-s", label: "Split or stacked diff", run: (view) => view.toggleSplitDiff() },
   { id: "nextChange", key: "ctrl-alt-down", label: "Next change", run: (view) => view.stepChange(1) },
   { id: "previousChange", key: "ctrl-alt-up", label: "Previous change", run: (view) => view.stepChange(-1) },
   { id: "nextTab", key: "ctrl-alt-right", label: "Next tab", run: (view) => view.cycleTab(1) },
@@ -273,6 +294,36 @@ const languageOf = (path, text) => dockerLanguage(basename(path)) ?? LANGUAGES[e
 
 const FIND_LIMIT = 2000;
 const GREP_LIMIT = 5000;
+const GREP_LINE_CHARS = 2000;
+const LIST_ROW = 24;
+const FILE_HEADER_ROW = 26;
+const PEEK_ROW = 18;
+const groupByFile = (entries, prefix) => {
+  const items = [];
+  entries.forEach((entry, index) => {
+    if (entry.path !== entries[index - 1]?.path) {
+      let count = 0;
+      while (entries[index + count]?.path === entry.path) count++;
+      items.push({ kind: "file", key: `${prefix}-file-${index}`, path: entry.path, count, height: FILE_HEADER_ROW });
+    }
+    items.push({ kind: "entry", key: `${prefix}-${index}`, index, entry });
+  });
+  return items;
+};
+const grepItems = (matches) => groupByFile(matches, "grep");
+const LINE_COUNTS = new WeakMap();
+const lineCounts = (file) => {
+  let counts = LINE_COUNTS.get(file);
+  if (!counts || counts.rows !== file.rows) {
+    counts = { rows: file.rows, added: 0, removed: 0 };
+    for (const row of file.rows) {
+      if (row.kind === "add") counts.added++;
+      else if (row.kind === "del") counts.removed++;
+    }
+    LINE_COUNTS.set(file, counts);
+  }
+  return counts;
+};
 const GREP_DEBOUNCE = 500;
 const REFERENCE_COLOR = "#eab30826";
 const PEEK_BG = "#ef444412";
@@ -282,6 +333,7 @@ const LIVE_DIFF_DELAY = 300;
 const CHANGE_DELAY = 150;
 const DIFF_SYNC_DELAY = 100;
 const DIFF_ADDED = "#22c55e12";
+const DIFF_GAP = "#8080800f";
 const COMMIT_ROWS = 20000;
 const GRAPH_ROW = 22;
 const DIFF_ROW = 18;
@@ -505,6 +557,8 @@ export default class Code extends View {
     this.sideWidth = SIDE_W;
     this.baseTexts = new Map();
     this.grep = { matches: [], index: -1, loading: false, message: "", caseSensitive: false, seq: 0 };
+    this.changesFilter = InputState.new({ placeholder: "Filter the files (regex, ! to exclude)" });
+    this.changesFilter.on("change", () => this.redraw());
     this.grepInput = InputState.new({ placeholder: "Find in the project" });
     this.grepInput.on("change", () => this.queueGrep(GREP_DEBOUNCE));
     this.grepInput.on("submit", () => this.queueGrep(0));
@@ -545,6 +599,8 @@ export default class Code extends View {
     this.instance = `${Date.now()}-${Math.random()}`;
     this.threads = [];
     this.threadsShown = true;
+    this.splitDiff = false;
+    this.splitLeader = "right";
     this.foldToggled = new Set();
     this.review = null;
     this.publishing = false;
@@ -552,7 +608,7 @@ export default class Code extends View {
     this.agentName = "the agent";
     this.commentInput = InputState.new({ placeholder: "Comment for the agent…" });
     this.commentInput.on("submit", () => this.addComment());
-    this.treeScroll = ScrollHandle.new();
+    this.treeScroll = VirtualListScrollHandle.new();
     this.tabScroll = ScrollHandle.new();
     this.pointerModifiers = null;
     this.servers = new Map();
@@ -663,15 +719,16 @@ export default class Code extends View {
       return;
     }
     if (!query || !this.root) {
-      this.grep = { ...this.grep, matches: [], index: -1, loading: false, message: "" };
+      this.grep = { ...this.grep, matches: [], items: [], index: -1, loading: false, message: "" };
       this.redraw();
       return;
     }
     this.grep.loading = true;
     this.redraw();
     const args = ["-C", this.root, "grep", "-n", "-I", "--untracked", "--no-color", "--full-name", "-F", ...(this.grep.caseSensitive ? [] : ["-i"]), "-e", query, "--", "."];
+    const capped = `git "$@" | cut -c1-${GREP_LINE_CHARS} | head -n ${GREP_LIMIT}; exit "\${PIPESTATUS[0]:-0}"`;
     this.grep.running = true;
-    const result = await exec("git", args, { timeout: 120000 }).catch((error) => ({ code: 2, stdout: "", stderr: String(error?.message ?? error) }));
+    const result = await exec("bash", ["-c", capped, "bash", ...args], { timeout: 120000 }).catch((error) => ({ code: 2, stdout: "", stderr: String(error?.message ?? error) }));
     this.grep.running = false;
     if (this.grep.pending || seq !== this.grep.seq) {
       this.grep.pending = false;
@@ -686,12 +743,14 @@ export default class Code extends View {
       const [, path, number, text] = parsed;
       const haystack = this.grep.caseSensitive ? text : text.toLowerCase();
       for (let at = haystack.indexOf(needle); at >= 0 && matches.length < GREP_LIMIT; at = haystack.indexOf(needle, at + needle.length)) {
-        matches.push({ path, line: Number(number) - 1, start: at, end: at + query.length, text });
+        const lead = text.slice(Math.max(0, at - 64), at).replace(/^\s+/, "");
+        matches.push({ path, line: Number(number) - 1, start: at, end: at + query.length,
+          lead: lead.length > 24 ? `…${lead.slice(-24)}` : lead, hit: text.slice(at, at + query.length), tail: text.slice(at + query.length, at + query.length + 200) });
       }
       if (matches.length >= GREP_LIMIT) break;
     }
-    const message = result.code > 1 ? (result.stderr || "git grep failed").trim().split("\n").pop() : "";
-    this.grep = { ...this.grep, matches, index: matches.length ? 0 : -1, loading: false, message, pending: false };
+    const message = result.code > 1 && result.code !== 141 ? (result.stderr || "git grep failed").trim().split("\n").pop() : "";
+    this.grep = { ...this.grep, matches, items: grepItems(matches), index: matches.length ? 0 : -1, loading: false, message, pending: false };
     this.redraw();
   }
 
@@ -751,6 +810,7 @@ export default class Code extends View {
   skipMatch() {
     if (this.grep.index < 0) return;
     this.grep.matches.splice(this.grep.index, 1);
+    this.grep.items = grepItems(this.grep.matches);
     if (this.grep.index >= this.grep.matches.length) this.grep.index = this.grep.matches.length - 1;
     this.showMatch(this.grep.index);
     this.redraw();
@@ -764,13 +824,17 @@ export default class Code extends View {
         match.end += delta;
       }
     }
+    this.grep.items = grepItems(this.grep.matches);
     if (this.grep.index >= this.grep.matches.length) this.grep.index = this.grep.matches.length - 1;
   }
 
   async replaceAll() {
     const replacement = this.replaceInput.value();
     const byPath = new Map();
-    for (const match of this.grep.matches) byPath.set(match.path, [...(byPath.get(match.path) ?? []), match]);
+    for (const match of this.grep.matches) {
+      if (!byPath.has(match.path)) byPath.set(match.path, []);
+      byPath.get(match.path).push(match);
+    }
     let replaced = 0;
     let stale = 0;
     for (const [path, matches] of byPath) {
@@ -800,6 +864,7 @@ export default class Code extends View {
       }
     }
     this.grep.matches = [];
+    this.grep.items = [];
     this.grep.index = -1;
     this.grep.message = `Replaced ${replaced} in ${byPath.size} file${byPath.size === 1 ? "" : "s"}${stale ? `, ${stale} skipped (changed since the search)` : ""}`;
     this.loadChanges();
@@ -814,28 +879,16 @@ export default class Code extends View {
       .when(enabled, (el) => el.cursor_pointer().hover((st) => st.bg(t.hover)).on_click(run))
       .when(!enabled, (el) => el.text_color(t.dim))
       .on_mouse_down("left", stop).child(label);
-    const rows = [];
-    let last = null;
-    matches.forEach((match, i) => {
-      if (match.path !== last) {
-        last = match.path;
-        const inFile = matches.filter((other) => other.path === match.path).length;
-        rows.push(h_flex().px(10).pt(6).pb(2).gap(6).items_center().min_w(0).text_size(11.5)
-          .child(iconElement(fileIcon(match.path), t.dim))
-          .child(div().min_w(0).truncate().child(basename(match.path)))
-          .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(match.path.slice(0, -basename(match.path).length - 1)))
-          .child(div().flex_1())
-          .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(inFile))));
-      }
-      const lead = match.text.slice(0, match.start).replace(/^\s+/, "");
-      rows.push(this.row(t, `grep-${i}`, 1, i === index)
-        .on_click(() => this.showMatch(i))
+    const draw = (item) => {
+      if (item.kind === "file") return this.fileHeader(t, item);
+      const match = item.entry;
+      return this.row(t, item.key, 1, item.index === index)
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(match.line + 1)))
         .child(h_flex().flex_1().min_w(0).overflow_hidden()
-          .child(div().flex_none().text_color(t.dim).child(lead.length > 24 ? `…${lead.slice(-24)}` : lead))
-          .child(div().flex_none().rounded(2).bg(FIND_COLOR).text_color(t.foreground).child(match.text.slice(match.start, match.end)))
-          .child(div().min_w(0).truncate().text_color(t.dim).child(match.text.slice(match.end)))));
-    });
+          .child(div().flex_none().text_color(t.dim).child(match.lead))
+          .child(div().flex_none().rounded(2).bg(FIND_COLOR).text_color(t.foreground).child(match.hit))
+          .child(div().min_w(0).truncate().text_color(t.dim).child(match.tail)));
+    };
     return v_flex().flex_1().min_h(0).min_w(0)
       .child(v_flex().flex_none().px(10).py(8).gap(6).border_b(1).border_color(t.border)
         .child(h_flex().gap(6).items_center()
@@ -851,7 +904,7 @@ export default class Code extends View {
           .child(div().flex_1())
           .child(div().flex_none().text_size(10.5).text_color(t.dim).child(count)))
         .when(Boolean(message), (el) => el.child(div().text_size(11).text_color(t.dim).child(message))))
-      .child(v_flex().id("grep-results").flex_1().min_h(0).pb(4).overflow_y_scrollbar().children(rows));
+      .child(this.rowList("grep-results", this.grep.items ?? [], draw, (item) => item.kind === "entry" && this.showMatch(item.index)));
   }
 
   focusFinder() {
@@ -905,6 +958,7 @@ export default class Code extends View {
       const { start, end } = document.state.selected_range();
       document.saved = text;
       document.state.set_value(text);
+      this.resetHistory(document);
       document.dirty = false;
       document.state.set_selected_range({ start: Math.min(start, text.length), end: Math.min(end, text.length) });
     }
@@ -970,11 +1024,11 @@ export default class Code extends View {
     const width = String(oldStart + old.length).length;
     return v_flex().flex_none().max_h(180).border_b(1).border_color(t.border).bg(PEEK_BG)
       .child(div().px(12).pt(4).pb(2).text_size(11).text_color(t.dim).child(`Before · ${what}`))
-      .child(v_flex().id("peek-lines").min_h(0).pb(4).overflow_y_scrollbar().font_family(MONO).text_size(12)
-        .children(old.map((text, i) => h_flex().px(12).gap(10).min_w(0)
-          .child(div().flex_none().text_color(t.dim).child(String(oldStart + i).padStart(width)))
+      .child(v_flex().h(Math.min(old.length, 8) * PEEK_ROW + 4).flex_none().font_family(MONO).text_size(12)
+        .child(this.rowList("peek-lines", old.map((text, i) => ({ key: `peek-${i}`, text, height: PEEK_ROW })), (item) => h_flex().id(item.key).h(PEEK_ROW).px(12).gap(10).min_w(0)
+          .child(div().flex_none().text_color(t.dim).child(String(oldStart + Number(item.key.slice(5))).padStart(width)))
           .child(div().flex_none().text_color(CHANGE_COLORS.deleted).child("−"))
-          .child(div().min_w(0).truncate().text_color(t.foreground).child(text.replace(/\t/g, "  ") || " ")))));
+          .child(div().min_w(0).truncate().text_color(t.foreground).child(item.text.replace(/\t/g, "  ") || " ")), () => {})));
   }
 
   shownChanges() {
@@ -1072,6 +1126,7 @@ export default class Code extends View {
     const file = this.changedFile(document.path);
     if (!file) {
       document.diff = null;
+      this.dropSplit(document);
       return null;
     }
     const fileRows = this.diffRows(document, file);
@@ -1090,6 +1145,9 @@ export default class Code extends View {
     }
     const out = [];
     const kinds = [];
+    const left = [];
+    const leftKinds = [];
+    const split = this.splitDiff;
     const notes = new Map();
     const relative = this.relative(document.path);
     const threadsHere = this.threadsShown ? this.threads.filter((thread) => thread.path === relative) : [];
@@ -1097,6 +1155,8 @@ export default class Code extends View {
       const push = (text, thread) => {
         out.push(`${NOTE_MARK}${text}`);
         kinds.push("note");
+        left.push("");
+        leftKinds.push("note");
         notes.set(out.length - 1, thread);
       };
       for (const thread of threadsHere.filter((x) => x.line === line)) {
@@ -1122,16 +1182,38 @@ export default class Code extends View {
         kinds.push("del");
       }
     };
-    lines.forEach((text, i) => {
-      pushDeleted(i + 1);
-      out.push(text);
-      kinds.push(added.has(i + 1) ? "add" : "ctx");
-      pushNotes(i + 1);
-    });
-    pushDeleted(lines.length + 1);
+    if (split) {
+      for (let i = 0; ;) {
+        let run = 0;
+        while (i + run < lines.length && added.has(i + run + 1)) run++;
+        const gone = Array.from({ length: run + 1 }, (_, k) => deleted.get(i + k + 1) ?? []).flat();
+        for (let k = 0; k < Math.max(gone.length, run); k++) {
+          out.push(k < run ? lines[i + k] : DELETED_MARK);
+          kinds.push(k < run ? "add" : "gap");
+          left.push(k < gone.length ? gone[k] : "");
+          leftKinds.push(k < gone.length ? "del" : "gap");
+          if (k < run) pushNotes(i + k + 1);
+        }
+        i += run;
+        if (i >= lines.length) break;
+        out.push(lines[i]);
+        kinds.push("ctx");
+        left.push(lines[i]);
+        leftKinds.push("ctx");
+        pushNotes(++i);
+      }
+    } else {
+      lines.forEach((text, i) => {
+        pushDeleted(i + 1);
+        out.push(text);
+        kinds.push(added.has(i + 1) ? "add" : "ctx");
+        pushNotes(i + 1);
+      });
+      pushDeleted(lines.length + 1);
+    }
     const value = out.join("\n");
     if (!document.diff) {
-      const state = EditorState.new({ language: syntaxOf(basename(document.path), extensionOf(document.path), document.language), value, font_family: MONO, folding: false });
+      const state = ownHistoryEditor({ language: syntaxOf(basename(document.path), extensionOf(document.path), document.language), value, font_family: MONO, folding: !split });
       document.diff = { state, value, deleted: out.filter(isVirtual) };
       state.on("change", () => this.queueDiffSync(document));
       this.trackTyping(document, state);
@@ -1153,16 +1235,73 @@ export default class Code extends View {
       document.diff.highlightKey = highlightKey;
       document.diff.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" ? [] : [{
         range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
-        color: kind === "del" ? DIFF_DELETED : kind === "note" ? NOTE_BG : DIFF_ADDED,
+        color: kind === "del" ? DIFF_DELETED : kind === "note" ? NOTE_BG : kind === "gap" ? DIFF_GAP : DIFF_ADDED,
       }])));
     }
+    if (split) this.buildSplit(document, left, leftKinds);
+    else this.dropSplit(document);
     return document.diff;
+  }
+
+  buildSplit(document, lines, kinds) {
+    const right = document.diff.state;
+    if (typeof right.set_scroll_top !== "function") return;
+    const value = lines.join("\n");
+    if (!document.split) {
+      const state = EditorState.new({ language: syntaxOf(basename(document.path), extensionOf(document.path), document.language), value, font_family: MONO, folding: false, readonly: true });
+      document.split = { state };
+      const follow = (side, from, to) => {
+        if (this.splitLeader !== side) return;
+        const top = from.scroll_top();
+        const there = to.scroll_top();
+        if (top !== null && (there === null || Math.abs(top - there) > 0.5)) to.set_scroll_top(top);
+      };
+      state.on("scroll", () => { if (document.split?.state === state && document.diff) follow("left", state, document.diff.state); });
+      if (!document.diff.followed) {
+        document.diff.followed = true;
+        right.on("scroll", () => { if (document.split && document.diff?.state === right) follow("right", right, document.split.state); });
+      }
+    } else if (document.split.state.value() !== value) {
+      document.split.state.set_value(value);
+    }
+    const key = kinds.join("");
+    if (document.split.key === key) return;
+    document.split.key = key;
+    let line = 0;
+    document.split.state.set_line_labels(kinds.map((kind) => (kind === "ctx" || kind === "del" ? String(++line) : "")));
+    document.split.state.set_highlights("diff", kinds.flatMap((kind, i) => (kind === "ctx" || kind === "note" ? [] : [{
+      range: { start: { line: i, character: 0 }, end: { line: i + 1, character: 0 } },
+      color: kind === "del" ? DIFF_DELETED : DIFF_GAP,
+    }])));
+    const top = right.scroll_top();
+    if (top !== null) document.split.state.set_scroll_top(top);
+  }
+
+  dropSplit(document) {
+    if (!document.split) return;
+    document.split.state.release();
+    document.split = null;
+  }
+
+  toggleSplitDiff() {
+    if (this.current?.diff && typeof this.current.diff.state.set_scroll_top !== "function") {
+      this.message = "The split diff needs a Herdr build with set_scroll_top";
+      return this.redraw();
+    }
+    this.splitDiff = !this.splitDiff;
+    for (const document of this.documents.values()) {
+      if (!document.diff) continue;
+      document.diff.state.set_folding?.(!this.splitDiff);
+      this.buildDiff(document);
+    }
+    this.message = this.splitDiff ? "Split diff" : "Stacked diff";
+    this.redraw();
   }
 
   stepChange(step) {
     const diff = this.current?.diff;
     const kinds = diff?.kinds ?? [];
-    const changed = (kind) => kind === "add" || kind === "del";
+    const changed = (kind) => kind === "add" || kind === "del" || kind === "gap";
     const starts = kinds.flatMap((kind, i) => (changed(kind) && (i === 0 || !changed(kinds[i - 1])) ? [i] : []));
     if (!starts.length) {
       this.message = "No changes in this file";
@@ -1768,6 +1907,7 @@ export default class Code extends View {
       }
     }
     if (this.typing?.document === document) this.typing = null;
+    this.dropSplit(document);
     document.state.release();
     this.message = "";
     this.redraw();
@@ -2143,36 +2283,19 @@ export default class Code extends View {
     const { current, items, loading, results, searching, renaming, message, selected } = this.symbol;
     const typed = this.symbolInput.value().trim();
     const browsing = Boolean(typed) && typed !== current?.name;
-    const rows = [];
-    if (browsing) {
-      results.forEach((found, i) => rows.push(this.row(t, `symbol-found-${i}`, 0, false)
-        .on_click(() => this.chooseSymbol(found))
-        .child(div().flex_none().text_size(10).text_color(t.dim).child(found.kind))
-        .child(div().flex_none().child(found.name))
+    const list = browsing
+      ? this.rowList("symbol-results", results.map((found, i) => ({ kind: "found", key: `symbol-found-${i}`, entry: found })), (row) => this.row(t, row.key, 0, false)
+        .child(div().flex_none().text_size(10).text_color(t.dim).child(row.entry.kind))
+        .child(div().flex_none().child(row.entry.name))
         .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim)
-          .child(`${found.container ? `${found.container} · ` : ""}${this.relative(found.path)}:${found.line + 1}`))));
-    } else {
-      let last = null;
-      items.forEach((item, i) => {
-        if (item.path !== last) {
-          last = item.path;
-          const relative = this.relative(item.path);
-          rows.push(h_flex().px(10).pt(6).pb(2).gap(6).items_center().min_w(0).text_size(11.5)
-            .child(iconElement(fileIcon(item.path), t.dim))
-            .child(div().min_w(0).truncate().child(basename(item.path)))
-            .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(relative.slice(0, -basename(item.path).length - 1)))
-            .child(div().flex_1())
-            .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(items.filter((other) => other.path === item.path).length))));
-        }
-        rows.push(this.row(t, `symbol-use-${i}`, 1, item === selected)
-          .on_click(() => {
-            this.symbol.selected = item;
-            this.goToReference(item);
-          })
-          .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(item.line + 1)))
-          .child(div().flex_1().min_w(0).truncate().child(item.text)));
+          .child(`${row.entry.container ? `${row.entry.container} · ` : ""}${this.relative(row.entry.path)}:${row.entry.line + 1}`)), (row) => this.chooseSymbol(row.entry))
+      : this.rowList("symbol-uses", this.symbolItems(items), (row) => (row.kind === "file" ? this.fileHeader(t, row) : this.row(t, row.key, 1, row.entry === selected)
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(row.entry.line + 1)))
+        .child(div().flex_1().min_w(0).truncate().child(row.entry.text))), (row) => {
+        if (row.kind !== "entry") return;
+        this.symbol.selected = row.entry;
+        this.goToReference(row.entry);
       });
-    }
     const files = new Set(items.map((item) => item.path)).size;
     const count = browsing ? (searching ? "Searching…" : `${results.length}${results.length >= SYMBOL_LIMIT ? "+" : ""} symbol${results.length === 1 ? "" : "s"}`)
       : current ? (loading ? "Looking for the uses…" : `${items.length} use${items.length === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"}`) : "";
@@ -2194,7 +2317,12 @@ export default class Code extends View {
             .child(div().flex_none().text_size(10.5).text_color(t.dim).child(count))))
         .when(browsing || !current, (el) => el.child(h_flex().child(div().flex_1()).child(div().flex_none().text_size(10.5).text_color(t.dim).child(count))))
         .when(Boolean(message), (el) => el.child(div().text_size(11).text_color(t.dim).child(message))))
-      .child(v_flex().id("symbol-results").flex_1().min_h(0).pb(4).overflow_y_scrollbar().children(rows));
+      .child(list);
+  }
+
+  symbolItems(items) {
+    if (this.symbol.grouped?.from !== items) this.symbol.grouped = { from: items, items: groupByFile(items, "symbol") };
+    return this.symbol.grouped.items;
   }
 
   async goToReference(item) {
@@ -2236,21 +2364,21 @@ export default class Code extends View {
         .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(title))
         .child(div().id("references-close").flex_none().px(6).rounded(4).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover))
           .on_mouse_down("left", stop).on_click(() => this.closeReferences()).child("Esc ✕")))
-      .child(v_flex().id("references-list").flex_1().min_h(0).py(4).overflow_y_scrollbar()
-        .when(!loading && !items.length, (el) => el.child(div().px(12).py(6).text_size(12).text_color(t.dim).child("No use found")))
-        .children(items.map((item, index) => this.row(t, `reference-${index}`, 0, item === this.references.selected)
-          .on_click(() => this.goToReference(item))
-          .child(div().flex_none().text_color(t.dim).child(`${this.relative(item.path)}:${item.line + 1}`))
-          .child(div().flex_1().min_w(0).truncate().child(item.text)))));
+      .when(!loading && !items.length, (el) => el.child(this.note(t, "No use found")))
+      .child(this.rowList("references-list", items.map((item, index) => ({ key: `reference-${index}`, entry: item })), (row) => this.row(t, row.key, 0, row.entry === this.references.selected)
+        .child(div().flex_none().text_color(t.dim).child(`${this.relative(row.entry.path)}:${row.entry.line + 1}`))
+        .child(div().flex_1().min_w(0).truncate().child(row.entry.text)), (row) => this.goToReference(row.entry)));
   }
 
   createDocument(path, text) {
     const extension = extensionOf(path);
     const language = languageOf(path, text);
-    const state = EditorState.new({ language: syntaxOf(basename(path), extension, language), value: text, font_family: MONO });
+    const state = ownHistoryEditor({ language: syntaxOf(basename(path), extension, language), value: text, font_family: MONO });
     const document = { path, uri: fileUri(path), state, saved: text, dirty: false, version: 1, diagnostics: [], diagnosticsBy: new Map(), language, preview: false, previewLine: null };
+    this.resetHistory(document);
     this.trackTyping(document, state);
     state.on("change", () => {
+      this.recordHistory(document);
       if (document.diff && !document.syncing) this.liveDiff(document);
       document.version += 1;
       const wasDirty = document.dirty;
@@ -2530,6 +2658,67 @@ export default class Code extends View {
   }
 
   // The editor (the file's, or its diff) that has the keyboard, so a line edit never lands in another field.
+  resetHistory(document) {
+    document.history = { undo: [], redo: [], last: document.state.value(), at: 0, applying: false };
+  }
+
+  recordHistory(document) {
+    const history = document.history;
+    const text = document.state.value();
+    if (history.applying || text === history.last) return;
+    const now = Date.now();
+    if (now - history.at > UNDO_GROUP_MS || !history.undo.length) {
+      history.undo.push(history.last);
+      if (history.undo.length > UNDO_DEPTH) history.undo.shift();
+    }
+    history.redo = [];
+    history.at = now;
+    history.last = text;
+  }
+
+  stepHistory(step) {
+    const document = this.typing?.document;
+    if (!document || this.documents.get(document.path) !== document || this.typing.state === document.split?.state) return false;
+    if (document.diff) this.flushDiffSync(document);
+    const history = document.history;
+    const from = step < 0 ? history.undo : history.redo;
+    if (!from.length) {
+      this.message = step < 0 ? "Nothing to undo" : "Nothing to redo";
+      this.redraw();
+      return true;
+    }
+    const before = document.state.value();
+    const text = from.pop();
+    (step < 0 ? history.redo : history.undo).push(before);
+    history.applying = true;
+    patchValue(document.state, text);
+    history.applying = false;
+    history.last = text;
+    history.at = 0;
+    if (document.diff) this.buildDiff(document);
+    const at = firstDifference(before, text) + Math.max(0, text.length - before.length);
+    this.selectReal(document, { start: at, end: at });
+    this.message = "";
+    this.redraw();
+    return true;
+  }
+
+  toggleFold() {
+    const state = this.typing?.state;
+    if (!state || typeof state.toggle_fold !== "function") return false;
+    const text = state.value();
+    const start = state.toggle_fold(positionOf(text, state.selected_range().start).line);
+    if (start === null) {
+      this.message = "No block to fold here";
+    } else {
+      const offset = offsetOf(text, { line: start, character: (text.split("\n")[start] ?? "").length });
+      state.set_selected_range({ start: offset, end: offset });
+      this.message = "";
+    }
+    this.redraw();
+    return true;
+  }
+
   trackTyping(document, state) {
     state.on("focus", () => { this.typing = { document, state }; });
     state.on("blur", () => { if (this.typing?.state === state) this.typing = null; });
@@ -2649,8 +2838,7 @@ export default class Code extends View {
     return side
       .child(h_flex().h(40).flex_none().px(10).items_center().border_b(1).border_color(t.border)
         .child(Input.new(this.finder).flex_1().h(28).text_size(12.5)))
-      .child(v_flex().id("code-files").flex_1().min_h(0).py(4).overflow_y_scrollbar().track_scroll(this.treeScroll)
-        .children(this.search.query ? this.searchRows(t) : this.treeView(t, currentPath)))
+      .child(this.search.query && !this.search.results.length ? this.note(t, "No file matches") : this.search.query ? this.searchRows(t) : this.treeView(t, currentPath))
       .child(this.reviewPanel(t));
   }
 
@@ -2809,58 +2997,94 @@ export default class Code extends View {
   changesView(t, currentPath) {
     const changes = this.shownChanges();
     const section = (label) => div().px(12).pt(10).pb(4).text_size(11).font_semibold().text_color(t.dim).child(label);
-    const rows = [];
-    if (!changes) rows.push(div().px(12).py(8).text_size(12).text_color(t.dim).child(this.changesLoading ? "Reading the branch…" : "No changes"));
-    else {
-      rows.push(h_flex().mx(8).mt(8).p(2).gap(2).rounded(6).border_1().border_color(t.border)
+    if (!changes) return v_flex().flex_1().min_h(0).child(this.note(t, this.changesLoading ? "Reading the branch…" : "No changes"));
+    const filter = this.changesRegex();
+    const rows = changes.files.flatMap((file, index) => (filter.regex && !filter.regex.keeps(file)
+      ? [] : [{ key: `changed-${index}`, file, ...lineCounts(file) }]));
+    return v_flex().flex_1().min_h(0)
+      .child(h_flex().flex_none().mx(8).mt(8).p(2).gap(2).rounded(6).border_1().border_color(t.border)
         .child(this.scopeButton(t, "uncommitted", "Uncommitted", this.working?.files.length ?? 0))
-        .child(this.scopeButton(t, "all", "All", this.changes?.files.length ?? 0)));
-      rows.push(div().px(12).pt(8).text_size(11.5).text_color(t.dim).font_family(MONO).truncate().child(`${changes.branch} → ${changes.base}`));
-      rows.push(section(`FILES · ${changes.files.length}`));
-      changes.files.forEach((file, index) => {
-        const added = file.rows.filter((row) => row.kind === "add").length;
-        const removed = file.rows.filter((row) => row.kind === "del").length;
-        rows.push(this.row(t, `changed-${index}`, 0, file.new_path === currentPath)
-          .on_click(() => this.open(file.new_path, null))
-          .child(iconElement(fileIcon(file.new_path), t.dim))
-          .child(h_flex().flex_1().min_w(0).gap(6).items_center()
-            .child(div().min_w(0).truncate().child(basename(file.new_path)))
-            .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(file.new_path.slice(0, -basename(file.new_path).length - 1))))
-          .child(div().flex_none().text_size(10.5).text_color("#16a34a").child(added ? `+${added}` : ""))
-          .child(div().flex_none().text_size(10.5).text_color("#dc2626").child(removed ? `−${removed}` : "")));
-      });
+        .child(this.scopeButton(t, "all", "All", this.changes?.files.length ?? 0)))
+      .child(div().flex_none().px(12).pt(8).text_size(11.5).text_color(t.dim).font_family(MONO).truncate().child(`${changes.branch} → ${changes.base}`))
+      .child(h_flex().flex_none().px(8).pt(8).child(Input.new(this.changesFilter).flex_1().h(26).text_size(12)))
+      .when(Boolean(filter.error), (el) => el.child(div().flex_none().px(12).pt(4).text_size(11).text_color(CHANGE_COLORS.deleted).child(filter.error)))
+      .child(div().flex_none().child(section(filter.regex ? `FILES · ${rows.length} of ${changes.files.length}` : `FILES · ${changes.files.length}`)))
+      .child(this.rowList("code-changes", rows, (row) => this.row(t, row.key, 0, row.file.new_path === currentPath)
+        .child(iconElement(fileIcon(row.file.new_path), t.dim))
+        .child(h_flex().flex_1().min_w(0).gap(6).items_center()
+          .child(div().min_w(0).truncate().child(basename(row.file.new_path)))
+          .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(row.file.new_path.slice(0, -basename(row.file.new_path).length - 1))))
+        .child(div().flex_none().text_size(10.5).text_color("#16a34a").child(row.added ? `+${row.added}` : ""))
+        .child(div().flex_none().text_size(10.5).text_color("#dc2626").child(row.removed ? `−${row.removed}` : "")), (row) => this.open(row.file.new_path, null)));
+  }
+
+  // Every list that can grow with the project goes through here: only the rows on screen are built.
+  // Rows carry no handlers (a virtual list refuses them); a click reaches `pick` with the row's item.
+  rowList(id, items, draw, pick, scroll = null) {
+    const byKey = new Map(items.map((item) => [item.key, item]));
+    const sizes = items.some((item) => item.height) ? items.map((item) => item.height ?? LIST_ROW) : LIST_ROW;
+    let list = v_virtual_list(id, items.length, sizes, (n) => items[n].key, (range) => items.slice(range.start, range.end).map(draw)).size_full()
+      .on_item_click((key) => { const item = byKey.get(key); if (item) pick(item); });
+    if (scroll) list = list.track_scroll(scroll);
+    return v_flex().flex_1().min_h(0).relative().child(list).child(Scrollbar.vertical(id).absolute().inset_0());
+  }
+
+  changesRegex() {
+    const source = this.changesFilter.value().trim();
+    if (this.changesFilterCache?.source !== source) {
+      const exclude = source.startsWith("!");
+      const pattern = exclude ? source.slice(1) : source;
+      let compiled = { source, regex: null, error: "" };
+      if (pattern) {
+        try {
+          const regex = new RegExp(pattern, "i");
+          compiled.regex = { keeps: (file) => regex.test(file.new_path) || regex.test(file.old_path ?? "") ? !exclude : exclude };
+        } catch (error) {
+          compiled.error = `Invalid regex: ${String(error?.message ?? error).split("\n")[0]}`;
+        }
+      }
+      this.changesFilterCache = compiled;
     }
-    return v_flex().id("code-changes").flex_1().min_h(0).pb(4).overflow_y_scrollbar().children(rows);
+    return this.changesFilterCache;
   }
 
   row(t, id, depth, selected) {
-    return h_flex().id(id).h(24).mx(4).min_w(0).overflow_hidden().pr(8).pl(6 + depth * 14).gap(6).items_center().rounded(5)
+    return h_flex().id(id).h(LIST_ROW).mx(4).min_w(0).overflow_hidden().pr(8).pl(6 + depth * 14).gap(6).items_center().rounded(5)
       .font_family(MONO).text_size(11.5).cursor_pointer().hover((s) => s.bg(t.hover))
-      .when(selected, (el) => el.bg(t.selected))
-      .on_mouse_down("left", stop);
+      .when(selected, (el) => el.bg(t.selected));
+  }
+
+  fileHeader(t, item) {
+    const relative = this.relative(item.path);
+    return h_flex().id(item.key).h(FILE_HEADER_ROW).px(10).pt(6).gap(6).items_center().min_w(0).text_size(11.5)
+      .child(iconElement(fileIcon(item.path), t.dim))
+      .child(div().min_w(0).truncate().child(basename(item.path)))
+      .child(div().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(relative.slice(0, -basename(item.path).length - 1)))
+      .child(div().flex_1())
+      .child(div().flex_none().text_size(10.5).text_color(t.dim).child(String(item.count)));
+  }
+
+  note(t, text) {
+    return div().px(12).py(6).text_size(12).text_color(t.dim).child(text);
   }
 
   searchRows(t) {
-    if (!this.search.results.length) return [div().px(12).py(6).text_size(12).text_color(t.dim).child("No file matches")];
-    return this.search.results.map((index, position) => {
-      const path = this.files[index];
-      return this.row(t, `match-${index}`, 0, position === this.finderAt)
-        .on_click(() => this.open(path, null))
-        .child(iconElement(fileIcon(path), t.dim))
-        .child(div().min_w(0).truncate().child(path));
-    });
+    const rows = this.search.results.map((index, position) => ({ key: `match-${index}`, path: this.files[index], position }));
+    return this.rowList("code-files", rows, (row) => this.row(t, row.key, 0, row.position === this.finderAt)
+      .child(iconElement(fileIcon(row.path), t.dim))
+      .child(div().min_w(0).truncate().child(row.path)), (row) => this.open(row.path, null), this.treeScroll);
   }
 
   treeView(t, currentPath) {
-    return this.treeRows().map((row) => this.row(t, `${row.kind}:${row.path}`, row.depth, row.path === currentPath)
-      .on_click(() => (row.kind === "folder" ? this.toggle(row.path) : this.open(row.path, null)))
+    const rows = this.treeRows().map((row) => ({ ...row, key: `${row.kind}:${row.path}` }));
+    return this.rowList("code-files", rows, (row) => this.row(t, row.key, row.depth, row.path === currentPath)
       .child(div().w(12).flex_none().text_size(11).text_color(t.dim).child(row.kind === "folder" ? (row.open ? "▾" : "▸") : ""))
       .child(row.kind === "folder"
         ? iconElement([OWN_ICON(row.open ? "folder-open" : "folder"), null], t.dim)
         : iconElement(fileIcon(row.path), t.dim))
       .child(div().min_w(0).truncate()
         .when(this.changedPaths.has(row.path), (el) => el.text_color(this.changedPaths.get(row.path) === "added" ? "#16a34a" : "#d97706"))
-        .child(row.name)));
+        .child(row.name)), (row) => (row.kind === "folder" ? this.toggle(row.path) : this.open(row.path, null)), this.treeScroll);
   }
 
   editorPane(t) {
@@ -2878,6 +3102,11 @@ export default class Code extends View {
           .when(this.copiedPath === document.path, (el) => el.text_color(CHANGE_COLORS.added))
           .on_mouse_down("left", stop).on_click((_e, cx) => this.copyPath(document, cx))
           .child(this.copiedPath === document.path ? "✓ copied" : "⧉ copy"))
+        .when(this.diffVisible(document), (el) => el.child(div().id("toggle-split").flex_none().px(5).rounded(4).cursor_pointer()
+          .hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .when(this.splitDiff, (st) => st.bg(t.selected).text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click(() => this.toggleSplitDiff())
+          .child(this.splitDiff ? `◫ split ${this.hint("splitDiff")}` : `☰ stacked ${this.hint("splitDiff")}`)))
         .when(isMarkdown(document.path), (el) => el.child(div().id("toggle-preview").flex_none().px(5).rounded(4).cursor_pointer()
           .hover((st) => st.bg(t.hover).text_color(t.foreground))
           .when(document.preview, (st) => st.bg(t.selected).text_color(t.foreground))
@@ -2902,7 +3131,16 @@ export default class Code extends View {
             this.pointerModifiers = e.modifiers;
             if (usesChord(e.modifiers)) this.cx.timer.after(0, () => this.findReferences());
           })
-          .child(Editor.new(this.activeState(document)).flex_1().min_h(0)))
+          .child(this.splitDiff && this.diffVisible(document) && document.split
+            ? h_flex().flex_1().min_h(0).min_w(0).items_stretch()
+              .child(div().flex().flex_col().flex_1().min_w(0).border_r(1).border_color(t.border)
+                .on_mouse_move(() => { this.splitLeader = "left"; })
+                .child(Editor.new(document.split.state).flex_1().min_h(0)))
+              .child(div().flex().flex_col().flex_1().min_w(0)
+                .on_mouse_move(() => { this.splitLeader = "right"; })
+                .on_key_down(() => { this.splitLeader = "right"; })
+                .child(Editor.new(document.diff.state).flex_1().min_h(0)))
+            : Editor.new(this.activeState(document)).flex_1().min_h(0)))
         .when(document.preview && isMarkdown(document.path), (el) => el.child(this.previewPane(t, document))))
       .when(Boolean(this.references), (el) => el.child(this.referencesPanel(t)));
   }
