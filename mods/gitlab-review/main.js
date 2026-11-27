@@ -1,4 +1,4 @@
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
 import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home, knownAgents, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
@@ -47,8 +47,8 @@ const DENY = [
 ];
 const TABS = ["description", "changes", "comments", "review"];
 const ICON = "mods/gitlab-review/icons";
-// Teaching reads like asking (the same denials, no plan mode) and may draw on the Excalidraw canvas.
-const teachArgv = (config, deny) => (Array.isArray(config?.agentAskArgs) || agentArgv(config)[0].split("/").pop() !== "claude"
+// The ask agent: the same denials, no plan mode, and the Excalidraw canvas for gitlab-teach's drawings.
+const readArgv = (config, deny) => (Array.isArray(config?.agentAskArgs) || agentArgv(config)[0].split("/").pop() !== "claude"
   ? askArgv(config, deny) : [...agentArgv(config), "--settings", JSON.stringify({ permissions: { deny, allow: ["mcp__excalidraw"] } })]);
 // The agents' colors, when Herdr's program table has none.
 const AGENT_COLOR = { claude: "#D97757", codex: "#10A37F", gemini: "#4285F4", opencode: "#A78BFA", cursor: "#38BDF8", aider: "#22C55E", amp: "#F472B6", other: "#60A5FA" };
@@ -1997,6 +1997,13 @@ export default class GitlabReview extends View {
     ].join("\n");
   }
 
+  // Before the first answer on a merge request, the agent asks if it is understood; if not, it teaches it (gitlab-teach).
+  firstQuestion(mr, question) {
+    return [this.brief(mr), "",
+      `I have questions about this merge request. Before you answer, ask me whether I already understand it. If I say no or not really, follow ${home()}/.claude/skills/gitlab-teach/SKILL.md first, then come back to my question. Otherwise just answer it.`,
+      "", `My question: ${question}`].join("\n");
+  }
+
   agentName() {
     return agentName(this.config);
   }
@@ -2052,37 +2059,6 @@ export default class GitlabReview extends View {
     });
   }
 
-  // Teach me this MR: the gitlab-teach skill, read-only, in a pane on the right; one agent per merge request.
-  teach(cx) {
-    const d = this.details[this.iid];
-    if (!d || this.teaching) return;
-    const iid = d.mr.iid;
-    this.teachers ??= {};
-    this.teaching = true;
-    cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        let term = this.teachers[iid];
-        if (!term || !terminals().some((x) => x.address === term && x.state === "live")) {
-          const skill = `${home()}/.claude/skills/gitlab-teach/SKILL.md`;
-          const text = `Teach me merge request !${iid} (${d.mr.title}, ${d.mr.web_url}): read ${skill} and follow it.`;
-          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", `teach-${iid}-${Date.now().toString(36)}`, "--cwd", this.top, "--", ...teachArgv(this.config, DENY), text]);
-          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-          term = this.teachers[iid] = JSON.parse(r.stdout).address;
-        }
-        const shown = await this.showRight(cx, term);
-        const pane = panes().find((p) => p.terminal === term)?.pane;
-        if (pane) run("pane.focus", { pane });
-        this.say(shown ? `${this.agentName()} teaches !${iid} on the right` : `${this.agentName()} is starting in the background`, cx, "success");
-      } catch (e) {
-        this.say(`Couldn't start the lesson: ${e?.message ?? e}`, cx, "error");
-      } finally {
-        this.teaching = false;
-        cx.notify();
-      }
-    });
-  }
-
   // Sends the text to an agent already open on the folder (this tab's first), else opens a tab with one there.
   async sendToAgent(cx, path, text, name) {
     const here = focused()?.tab;
@@ -2116,7 +2092,7 @@ export default class GitlabReview extends View {
       .when(!enabled, (el) => el.opacity(0.5))
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => action(cx)))
       .on_mouse_down("left", stop)
-      .child(svg(icon).size(14).flex_none().text_color(color))
+      .child(prog?.tint ? svg(icon).size(14).flex_none().text_color(color) : image(icon).size(14).flex_none())
       .child(label);
   }
 
@@ -2137,7 +2113,7 @@ export default class GitlabReview extends View {
 
   async launchClaude(text) {
     const name = `mr-review-${Date.now().toString(36)}`;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...askArgv(this.config, DENY), text]);
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...readArgv(this.config, DENY), text]);
     if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
     return JSON.parse(r.stdout).address ?? name;
   }
@@ -2158,12 +2134,12 @@ export default class GitlabReview extends View {
     cx.spawn(async (cx) => {
       try {
         if (this.claudeAlive()) {
-          const text = this.briefed.has(iid) ? `[MR !${iid}] ${question}` : `${this.brief(d.mr)}\n\nMy question: ${question}`;
+          const text = this.briefed.has(iid) ? `[MR !${iid}] ${question}` : this.firstQuestion(d.mr, question);
           if (!this.claudeShown()) await this.showClaude(cx);
           const r = await hc(["send", this.claude, text]);
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         } else {
-          this.claude = await this.launchClaude(`${this.brief(d.mr)}\n\nMy question: ${question}`);
+          this.claude = await this.launchClaude(this.firstQuestion(d.mr, question));
           this.briefed = new Set();
         }
         this.briefed.add(iid);
@@ -3039,8 +3015,7 @@ export default class GitlabReview extends View {
     const side = v_flex().id("mr-side").w(SIDEBAR_W).flex_none().min_h(0).border_l(1).border_color(t.border).bg(t.surface).overflow_y_scrollbar()
       .px(12).py(12).gap(16)
       .child(this.sideSection(t, "Status", null, status))
-      .child(h_flex().w_full().gap(6).flex_wrap().child(this.actionsButton(t, d))
-        .when(real, (el) => el.child(this.agentButton(t, "sa-teach", this.teaching ? "Starting…" : "Teach me this MR", (cx) => this.teach(cx), !this.teaching))));
+      .child(h_flex().w_full().child(this.actionsButton(t, d)));
     if (!real) {
       return side.when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)));
     }

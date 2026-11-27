@@ -1,6 +1,6 @@
 ---
 name: gitlab-teach
-description: Teach Florent a GitLab merge request in short lessons, in this terminal, with a drawing of its flow; read-only. Started from gitlab-review's Teach me this MR.
+description: Teach Florent a GitLab merge request in short lessons, in this terminal, with a drawing of its flow; read-only. The gitlab-review ask agent follows it when he says he does not understand the merge request yet.
 argument-hint: "<MR iid>"
 disable-model-invocation: true
 ---
@@ -21,7 +21,7 @@ Every claim points at `path:line`. When the sources don't say, write "je ne sais
 
 ## First, one question
 
-Ask why he reads it, with your guess from the merge request: he reviews it, he will work on this code next, or he discovers this part of the repo. It sets the depth. Then wait.
+When the ask agent hands over, his question waits until the lessons end: answer it then. Ask why he reads it, with your guess from the merge request: he reviews it, he will work on this code next, or he discovers this part of the repo. It sets the depth. Then wait.
 
 ## The lessons
 

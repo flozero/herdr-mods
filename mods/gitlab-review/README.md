@@ -6,11 +6,10 @@
 
 Review GitLab merge requests in a Herdr window: a person picker at the top of the list (you by default, `p` for someone else) with four filters on that person: to review, authored, recent merged and ignored (`1`–`4`), the description, the diff (split or unified), threads, draft comments, approvals.
 
-- **Ask the agent** (`g`, `⌥↵` in the comment box) opens a read-only agent on the right that knows the merge request and answers your questions. Nothing is posted.
+- **Ask the agent** (`g`, or Send to ▾ → the agent, `⌥↵`, in the comment box) opens a read-only agent on the right that knows the merge request and answers your questions. Nothing is posted. Before its first answer on a merge request it asks whether you understand it; if not, it teaches it first with the `gitlab-teach` skill (installed with the mod: short lessons, a drawing in Excalidraw, each claim at `path:line`, after AI Hero's `/teach`).
 - **On the merge request**: edit the title (click it), the description and labels; resolve threads; apply a reviewer's suggestion (`Suggest a change` in the comment box writes one); edit or delete your comments; reactions; re-request a review; mark files viewed (`v`, kept on this computer, reset when the file's diff changes). When the branch is behind its target, ask the agent to rebase it.
 - **Actions** (the `Actions ▾` button in the sidebar): mark as ready or draft, open in the browser or an editor, ignore, search, reload.
 - **The comment box**: `Add to review` (`⌘↵`) keeps the comment pending; `Send to ▾` sends the review to the agent or to GitLab; `Review ▾` approves or requests changes (with the pending comments and the text, if any), closes, closes with the text as a comment, reopens, or discards the pending comments.
-- **Teach me this MR** (sidebar) starts the agent on the `gitlab-teach` skill (installed with the mod in `~/.claude/skills`), read-only, on the right: one question on why you read it, then 3 to 5 short lessons (why, with a drawing in Excalidraw, the changes in reading order, what could break), each pointing at `path:line`. After AI Hero's `/teach`, without notes kept.
 - **Local review**: on a branch without a merge request (or opened with `local`), comments on the code go to an agent working in the checkout (`a`), which changes the code.
 - **Review rules**: with `rulesUrl`, the agent you ask (`g`) knows the rules that match the merge request's files.
 
