@@ -47,6 +47,9 @@ const DENY = [
 ];
 const TABS = ["description", "changes", "comments", "review"];
 const ICON = "mods/gitlab-review/icons";
+// Teaching reads like asking (the same denials, no plan mode) and may draw on the Excalidraw canvas.
+const teachArgv = (config, deny) => (Array.isArray(config?.agentAskArgs) || agentArgv(config)[0].split("/").pop() !== "claude"
+  ? askArgv(config, deny) : [...agentArgv(config), "--settings", JSON.stringify({ permissions: { deny, allow: ["mcp__excalidraw"] } })]);
 // The agents' colors, when Herdr's program table has none.
 const AGENT_COLOR = { claude: "#D97757", codex: "#10A37F", gemini: "#4285F4", opencode: "#A78BFA", cursor: "#38BDF8", aider: "#22C55E", amp: "#F472B6", other: "#60A5FA" };
 const LIST_TABS = ["review", "authored", "merged", "ignored"];
@@ -2049,6 +2052,37 @@ export default class GitlabReview extends View {
     });
   }
 
+  // Teach me this MR: the gitlab-teach skill, read-only, in a pane on the right; one agent per merge request.
+  teach(cx) {
+    const d = this.details[this.iid];
+    if (!d || this.teaching) return;
+    const iid = d.mr.iid;
+    this.teachers ??= {};
+    this.teaching = true;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        let term = this.teachers[iid];
+        if (!term || !terminals().some((x) => x.address === term && x.state === "live")) {
+          const skill = `${home()}/.claude/skills/gitlab-teach/SKILL.md`;
+          const text = `Teach me merge request !${iid} (${d.mr.title}, ${d.mr.web_url}): read ${skill} and follow it.`;
+          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", `teach-${iid}-${Date.now().toString(36)}`, "--cwd", this.top, "--", ...teachArgv(this.config, DENY), text]);
+          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+          term = this.teachers[iid] = JSON.parse(r.stdout).address;
+        }
+        const shown = await this.showRight(cx, term);
+        const pane = panes().find((p) => p.terminal === term)?.pane;
+        if (pane) run("pane.focus", { pane });
+        this.say(shown ? `${this.agentName()} teaches !${iid} on the right` : `${this.agentName()} is starting in the background`, cx, "success");
+      } catch (e) {
+        this.say(`Couldn't start the lesson: ${e?.message ?? e}`, cx, "error");
+      } finally {
+        this.teaching = false;
+        cx.notify();
+      }
+    });
+  }
+
   // Sends the text to an agent already open on the folder (this tab's first), else opens a tab with one there.
   async sendToAgent(cx, path, text, name) {
     const here = focused()?.tab;
@@ -3005,7 +3039,8 @@ export default class GitlabReview extends View {
     const side = v_flex().id("mr-side").w(SIDEBAR_W).flex_none().min_h(0).border_l(1).border_color(t.border).bg(t.surface).overflow_y_scrollbar()
       .px(12).py(12).gap(16)
       .child(this.sideSection(t, "Status", null, status))
-      .child(h_flex().w_full().child(this.actionsButton(t, d)));
+      .child(h_flex().w_full().gap(6).flex_wrap().child(this.actionsButton(t, d))
+        .when(real, (el) => el.child(this.agentButton(t, "sa-teach", this.teaching ? "Starting…" : "Teach me this MR", (cx) => this.teach(cx), !this.teaching))));
     if (!real) {
       return side.when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)));
     }
