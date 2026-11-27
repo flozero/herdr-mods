@@ -2001,7 +2001,7 @@ export default class GitlabReview extends View {
   firstQuestion(mr, question) {
     return [this.brief(mr), "",
       `I have questions about this merge request. Before you answer, ask me whether I already understand it. If I say no or not really, follow ${home()}/.claude/skills/gitlab-teach/SKILL.md first, then come back to my question. Otherwise just answer it.`,
-      "", `My question: ${question}`].join("\n");
+      "", question ? `My question: ${question}` : "Read it, then wait for my first question."].join("\n");
   }
 
   agentName() {
@@ -2171,10 +2171,10 @@ export default class GitlabReview extends View {
           term = this.fixer;
         } else {
           if (!this.claudeAlive()) {
-            this.claude = await this.launchClaude(`${this.brief(d.mr)}\n\nRead it, then wait for my questions.`);
+            this.claude = await this.launchClaude(this.firstQuestion(d.mr, null));
             this.briefed = new Set([iid]);
           } else if (!this.briefed.has(iid)) {
-            const r = await hc(["send", this.claude, `${this.brief(d.mr)}\n\nRead it, then wait for my questions.`]);
+            const r = await hc(["send", this.claude, this.firstQuestion(d.mr, null)]);
             if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
             this.briefed.add(iid);
           }
