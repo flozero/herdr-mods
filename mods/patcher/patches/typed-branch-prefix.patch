@@ -6,7 +6,7 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
      this.error = "";
      cx.notify();
 -    if (!remove) claim(this.text.trim());
-     try { this.error = remove ? await this.remove(cx) : await this.create(cx); }
+     try { if (!remove) this.handle.focus(); this.error = remove ? await this.remove(cx) : await this.create(cx); }
      catch (error) { this.error = String(error); }
      this.busy = false;
 @@ -404,10 +403,14 @@

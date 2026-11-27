@@ -92,7 +92,26 @@ export class Places {
     return out.sort((a, b) => b.rank - a.rank);
   }
 
-  async start(c, { name, argv, task }) {
+  // The main checkout of the first folder that is in git (a worktree gives its parent repo).
+  async parentRepo(folders) {
+    for (const f of folders) {
+      if (!f) continue;
+      const r = await exec("git", ["-C", f, "rev-parse", "--path-format=absolute", "--git-common-dir"]).catch(() => null);
+      if (!r || r.code !== 0) continue;
+      const common = r.stdout.trim();
+      const folder = common.replace(/\/\.git\/?$/, "");
+      const url = await exec("git", ["-C", folder, "remote", "get-url", "origin"]).catch(() => null);
+      return { folder, repo: url?.code === 0 ? repoOf(url.stdout) : null, name: folder.split("/").pop() };
+    }
+    return null;
+  }
+
+  // A worktree on the issue's branch in that repo, for start().
+  worktreeIn(parent, branch) {
+    return { kind: "worktree", rank: 2, machine: null, folder: parent.folder, repo: parent.repo, branch, dest: null };
+  }
+
+  async start(c, { name, argv, task, space = "" }) {
     if (c.kind === "tab") {
       run("tab.new", { space: c.space.id, folder: c.folder || undefined, name, argv, task });
       run("space.select", { id: c.space.id });
@@ -104,7 +123,7 @@ export class Places {
     }
     if (this.worktreeMod) {
       openOverlay({ mod: this.worktreeMod, kind: "dialog", width: 460, height: 280,
-        props: { folder: c.folder, machine: c.machine, branch: c.branch, tab: name, argv, task, repoSpace: true } });
+        props: { folder: c.folder, machine: c.machine, branch: c.branch, name: space, tab: name, argv, task, repoSpace: true } });
       return;
     }
     const o = on(c.machine);
@@ -115,6 +134,6 @@ export class Places {
       const r = await exec("git", ["-C", c.folder, "worktree", "add", ...(has ? [path, c.branch] : ["-b", c.branch, path, "HEAD"])], o);
       if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").pop());
     }
-    run("space.new", { folder: path, ...(c.machine ? { machine: c.machine } : {}), tab: name, argv, task });
+    run("space.new", { folder: path, ...(c.machine ? { machine: c.machine } : {}), ...(space ? { name: space } : {}), tab: name, argv, task });
   }
 }

@@ -19,9 +19,11 @@ In `mods/worktree` → `my-worktree` (New worktree):
   `--track`ed; without `origin/HEAD`, from `HEAD`.
 - The space gets the typed name (unnamed otherwise, as Herdr does). With a message it runs
   `claude` with the message as its first one (after the setup); without one, a shell.
-- Props from another mod win: `{ branch, argv, task, tab, repoSpace }`. Linear's Work with
+- Props from another mod win: `{ branch, name, argv, task, tab, repoSpace }` (`name` fills the space name). Linear's Work with
   Claude (`worktreeMod: "my-worktree"`) passes them; with `branch` the dialog creates at once.
   `repoSpace: true` opens the repo's main checkout space first, so the worktree nests under it.
+- While it creates, the fields are greyed out and disabled and the keyboard leaves them, so
+  what Linear passed (or what was typed) can't be changed halfway.
 - `my-menu` and `my-new-menu` open New worktree 400px high to fit the fields.
 
 ## What it expects from Herdr's original

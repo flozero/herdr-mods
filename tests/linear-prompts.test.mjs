@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { saveTemplate, deleteTemplate, worktreeChoices, startTask } from "../mods/linear/prompts.js";
+import { saveTemplate, deleteTemplate, parentChoices, startTask } from "../mods/linear/prompts.js";
 
 test("a template is added, a same name replaces it, an empty one is ignored", () => {
   let l = saveTemplate([], "Fix", "fix it\n- **now**");
@@ -12,10 +12,12 @@ test("a template is added, a same name replaces it, an empty one is ignored", ()
   assert.deepEqual(deleteTemplate(l, "fix"), []);
 });
 
-test("only worktree choices, in rank order", () => {
-  const c = [{ kind: "tab" }, { kind: "worktree", repo: "a/b" }, { kind: "open" }, { kind: "worktree", repo: "c/d" }];
-  assert.deepEqual(worktreeChoices(c).map((x) => x.repo), ["a/b", "c/d"]);
-  assert.deepEqual(worktreeChoices([]), []);
+test("a new worktree only in the parent repo", () => {
+  const c = [{ kind: "tab", rank: 3 }, { kind: "worktree", rank: 1, folder: "/a" }, { kind: "open", rank: 0 }, { kind: "worktree", rank: 2, folder: "/c" }];
+  assert.deepEqual(parentChoices(c, { folder: "/a" }, null).map((x) => x.folder ?? x.kind), ["tab", "/a", "open"]);
+  const made = { kind: "worktree", rank: 2, folder: "/z" };
+  assert.deepEqual(parentChoices(c, { folder: "/z" }, made).map((x) => x.folder ?? x.kind), ["tab", "/z", "open"]);
+  assert.deepEqual(parentChoices(c, null, null).map((x) => x.kind), ["tab", "open"]);
 });
 
 test("the typed prompt comes before the issue context", () => {

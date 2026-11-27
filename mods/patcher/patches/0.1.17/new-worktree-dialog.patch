@@ -58,7 +58,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
 +    this.message = InputState.new({ placeholder: "first message to Claude (optional)" });
 +    this.message.on("change", (_e, cx) => this.suggest(cx));
 +    this.message.on("submit", (_e, cx) => this.go(cx));
-+    this.spaceName = InputState.new({ placeholder: "space name (optional)" });
++    this.spaceName = InputState.new({ value: props()?.name ?? "", placeholder: "space name (optional)" });
 +    this.spaceName.on("submit", (_e, cx) => this.go(cx));
 +    this.fieldFocus = "";
 +    for (const [field, state] of [["message", this.message], ["spaceName", this.spaceName]]) {
@@ -78,7 +78,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
          // loading lands on nothing and the dialog stays keyboard-dead.
          this.handle.focus();
 -        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
-+        if (props().action !== "remove") cx.timer.after(100, () => this.first().focus());
++        if (props().action !== "remove") cx.timer.after(100, () => this.busy || this.first().focus());
          if (props().branch) await this.work(cx);
        } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
      });
@@ -136,7 +136,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
 +  }
 +
 +  field(state, focused, t) {
-+    return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground);
++    return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground).disabled(Boolean(this.busy)).opacity(this.busy ? 0.5 : 1);
 +  }
 +
 +  async base() {
@@ -220,7 +220,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
        .when(remove && this.locked !== null, (el) => el.child(div().text_color(t.blocked).child(`It's locked${lockedBy(this.locked)}: removing it overrides the lock.`)))
        .when(!remove && !blocked, (el) =>
 -        el.child(
-+        el.child(this.field(this.message, this.fieldFocus === "message", t)).child(
++        el.child(this.field(this.message, this.fieldFocus === "message", t)).child(this.busy ? this.field(this.input, false, t) :
            Input.new(this.input)
              .h(32)
              .px(10)

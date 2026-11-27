@@ -29,7 +29,7 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
 +    this.message = InputState.new({ placeholder: "first message to the agent (optional)" });
      this.message.on("change", (_e, cx) => this.suggest(cx));
      this.message.on("submit", (_e, cx) => this.go(cx));
-     this.spaceName = InputState.new({ placeholder: "space name (optional)" });
+     this.spaceName = InputState.new({ value: props()?.name ?? "", placeholder: "space name (optional)" });
 @@ -340,8 +346,8 @@
        cx.spawn(async (cx) => {
          let name = "";
@@ -54,7 +54,7 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
 +  }
 +
    field(state, focused, t) {
-     return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground);
+     return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground).disabled(Boolean(this.busy)).opacity(this.busy ? 0.5 : 1);
    }
 @@ -416,7 +430,7 @@
      if (!r.ok) return r.err || "git worktree add failed.";

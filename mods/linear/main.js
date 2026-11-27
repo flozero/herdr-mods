@@ -10,9 +10,9 @@ import { isoDay, parseDay } from "./dates.js";
 import * as Q from "./query.js";
 import { Images, splitMarkdown, splitImages, imageParts, imageUrls } from "./media.js";
 import { Store, JsonFile } from "./store.js";
-import { saveTemplate, deleteTemplate, worktreeChoices, startTask } from "./prompts.js";
+import { saveTemplate, deleteTemplate, parentChoices, startTask } from "./prompts.js";
 import { T, setLanguage } from "./i18n.js";
-import { Places } from "./places.js";
+import { Places, issueBranch } from "./places.js";
 import { stateIcon } from "./states.js";
 import * as Doc from "./doc.js";
 import { historyEntries, createdBy } from "./history.js";
@@ -196,6 +196,15 @@ export default class Linear extends View {
     this.startDraft.on("change", (_e, cx) => cx.notify());
     this.startDraft.on("submit", (e, cx) => { if (e?.secondary) this.runStart(cx); });
     this.templateInput = InputState.new({ placeholder: "" });
+    // The new worktree's branch and space, filled from the issue and editable.
+    this.branchInput = InputState.new({ placeholder: "" });
+    this.spaceInput = InputState.new({ placeholder: "" });
+    for (const [field, st] of [["branch", this.branchInput], ["space", this.spaceInput]]) {
+      st.on("change", (_e, cx) => cx.notify());
+      st.on("submit", (_e, cx) => this.runStart(cx));
+      st.on("focus", (_e, cx) => { if (this.starting) this.starting.field = field; cx.notify(); });
+      st.on("blur", (_e, cx) => { if (this.starting?.field === field) this.starting.field = null; cx.notify(); });
+    }
     this.templateInput.on("submit", (_e, cx) => this.addTemplate(cx));
     this.newTitle = InputState.new({ placeholder: "" });
     this.newTitle.on("change", (_e, cx) => cx.notify());
@@ -744,12 +753,25 @@ export default class Linear extends View {
   }
 
   openStart(issue, cx) {
-    this.starting = { issue, repo: 0, naming: false };
+    const s = this.starting = { issue, parent: undefined, naming: false, field: null };
     this.startDraft.set_value("");
     this.templateInput.set_value("");
+    this.branchInput.set_value(this.ownBranch(issueBranch(issue)));
+    this.spaceInput.set_value(issue.identifier);
     cx.timer.after(0, () => this.startDraft.focus());
-    cx.spawn(async (cx) => { await this.places.scanAll(); cx.notify(); });
+    cx.spawn(async (cx) => {
+      const parent = await this.parentRepo();
+      if (this.starting === s) { s.parent = parent; cx.notify(); }
+    });
     cx.notify();
+  }
+
+  // The git repo the agent works in: the parent repo of where Linear was opened from, the
+  // focused pane, or worktreeRepo. undefined while looking, null when there is none.
+  parentRepo() {
+    const f = this.focusedPlace();
+    const space = spaces().find((x) => x.id === focused()?.space);
+    return this.places.parentRepo([this.origin?.cwd, f?.cwd, space?.folder, this.places.preferred]);
   }
 
   closeStart(cx) {
@@ -758,9 +780,6 @@ export default class Linear extends View {
     cx.notify();
   }
 
-  startRepos() {
-    return this.starting ? worktreeChoices(this.places.choices(this.starting.issue)) : [];
-  }
 
   saveTemplates(list, cx) {
     this.templates = list;
@@ -782,15 +801,17 @@ export default class Linear extends View {
 
   runStart(cx) {
     const s = this.starting;
-    const c = this.startRepos()[s?.repo ?? 0];
-    if (!s || !c || this.sending) return;
+    if (!s?.parent || this.sending) return;
+    const branch = this.branchInput.value().trim(), space = this.spaceInput.value().trim();
+    if (!branch) { this.say(T().branchEmpty, cx); this.branchInput.focus(); return; }
+    const c = this.places.worktreeIn(s.parent, branch);
     this.sending = true;
     this.say(T().starting, cx);
     const prompt = this.startDraft.value();
     cx.spawn(async (cx) => {
       try {
         const task = startTask(prompt, await this.taskFor(s.issue, Boolean(c.machine), cx));
-        await this.places.start(c, { name: s.issue.identifier, argv: agentArgv(this.config), task });
+        await this.places.start(c, { name: s.issue.identifier, argv: agentArgv(this.config), task, space });
         if (this.starting === s) { this.starting = null; this.dismiss(); }
       } catch (e) {
         this.status = { text: `${T().pickFailed}: ${e?.message ?? e}`, level: "error" };
@@ -802,24 +823,28 @@ export default class Linear extends View {
   }
 
   startKey(k, cx) {
-    const s = this.starting, n = this.startRepos().length;
+    const s = this.starting;
     if (k === "cmd-enter" || k === "ctrl-enter") this.runStart(cx);
     else if (k === "escape" && s.naming) { s.naming = false; this.startDraft.focus(); cx.notify(); }
     else if (k === "escape") this.closeStart(cx);
-    else if ((k === "ctrl-n" || k === "ctrl-p") && n > 1) { s.repo = (s.repo + (k === "ctrl-n" ? 1 : n - 1)) % n; cx.notify(); }
+    // Branch → space → prompt.
+    else if (k === "tab" && s.field) (s.field === "branch" ? this.spaceInput : this.startDraft).focus();
+    else if (k === "shift-tab" && s.field) (s.field === "space" ? this.branchInput : this.startDraft).focus();
     else return false;
     return true;
   }
 
   startView(t) {
-    const tr = T(), s = this.starting, repos = this.startRepos();
-    const chip = (id, on, label, action) => h_flex().id(id).h(24).px(9).items_center().rounded(12).border_1().text_size(11.5).cursor_pointer()
-      .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
-      .hover((st) => st.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
-    const where = repos.length > 1
-      ? h_flex().gap(6).flex_wrap().items_center().child(div().text_size(11.5).text_color(t.dim).child(tr.repo))
-        .children(repos.map((c, n) => chip(`st-repo-${n}`, n === s.repo, c.repo ?? c.folder, (cx) => { s.repo = n; cx.notify(); })))
-      : div().text_size(11.5).text_color(t.dim).child(repos.length ? `${tr.repo} ${repos[0].repo ?? repos[0].folder}` : this.places.scanning() ? tr.scanning : tr.noWorktree);
+    const tr = T(), s = this.starting;
+    const where = div().text_size(11.5).text_color(s.parent === null ? t.blocked : t.dim)
+      .child(s.parent ? `${tr.repo} ${s.parent.repo ?? s.parent.name} · ${s.parent.folder.replace(home(), "~")}` : s.parent === null ? tr.noParentRepo : tr.scanning);
+    const field = (key, label, state) => h_flex().flex_1().min_w(0).gap(8).items_center()
+      .child(div().w(52).flex_none().text_size(11.5).text_color(t.dim).child(label))
+      .child(h_flex().id(`st-${key}`).flex_1().min_w(0).h(30).px(10).items_center().rounded(8).border_1().bg(t.background)
+        .border_color(s.field === key ? t.accent : t.border).child(Input.new(state).flex_1().h_full().text_size(12.5)));
+    const names = v_flex().gap(6)
+      .child(field("branch", tr.branchLabel, this.branchInput))
+      .child(field("space", tr.spaceLabel, this.spaceInput));
     const templates = v_flex().gap(4)
       .child(div().text_size(11).font_semibold().text_color(t.dim).child(tr.templates))
       .child(this.templates.length
@@ -829,11 +854,12 @@ export default class Linear extends View {
             .on_click((_e, cx) => { this.startDraft.set_value(x.text); this.startDraft.focus(); cx.notify(); }).child(x.name))
           .child(this.miniButton(t, `st-tpl-del-${n}`, "×", (cx) => this.saveTemplates(deleteTemplate(this.templates, x.name), cx)))))
         : div().text_size(12).text_color(t.dim).child(tr.noTemplates));
-    const canStart = repos.length > 0 && !this.sending;
+    const canStart = Boolean(s.parent) && !this.sending;
     const panel = v_flex().id("start-agent").w(560).max_w_full().gap(12).p(16).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
       .child(div().text_size(14).font_semibold().child(tr.startTitle(s.issue.identifier)))
       .child(where)
+      .child(names)
       .child(div().w_full().min_w(0).rounded(8).border_1().bg(t.background).border_color(t.border)
         .child(Textarea.new(this.startDraft).w_full()))
       .child(templates)
@@ -1924,14 +1950,20 @@ export default class Linear extends View {
   // Asks where to work, then opens a tab (or a worktree space) named after the issue, running
   // the agent with the issue as its first message.
   work(issue, cx) {
-    this.pick = { issue, sel: 0 };
-    cx.spawn(async (cx) => { await this.places.scanAll(); cx.notify(); });
+    const pick = this.pick = { issue, sel: 0, parent: undefined };
+    cx.spawn(async (cx) => {
+      const [parent] = await Promise.all([this.parentRepo(), this.places.scanAll()]);
+      pick.parent = parent;
+      cx.notify();
+    });
     cx.notify();
   }
 
   choices() {
-    if (!this.pick) return [];
-    return this.places.choices(this.pick.issue);
+    const p = this.pick;
+    if (!p) return [];
+    const branch = this.ownBranch(issueBranch(p.issue));
+    return parentChoices(this.places.choices(p.issue), p.parent, p.parent && this.places.worktreeIn(p.parent, branch));
   }
 
   startChoice(c, cx) {
