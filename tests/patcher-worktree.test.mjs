@@ -59,7 +59,7 @@ function harness({ settings = null, files = {}, extra = {}, reply = () => undefi
   const store = {};
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element, svg: element, image: element,
-    Input: { new: element }, Scrollbar: { vertical: element }, InputState: { new: (o) => inputState(o?.value ?? "") }, theme: () => ({}),
+    Input: { new: () => { const el = element(); el.node.input = true; return el; } }, Scrollbar: { vertical: element }, InputState: { new: (o) => inputState(o?.value ?? "") }, theme: () => ({}),
     appHome: () => "/app", home: () => "/home/user",
     readTextFile: async (path) => (path === "/app/settings.json" ? settings && JSON.stringify(settings) : files[path] ?? null),
     spaces: () => structuredClone(spaceList), panes: () => structuredClone(paneList),
@@ -272,4 +272,18 @@ test("statusbar: issue ids from the branch, publishing only on change, merge req
   assert.deepEqual(mr.pipeline, { status: "running", web_url: "https://gitlab.com/g/p/-/pipelines/1" });
   assert.deepEqual(mr.diff_refs, { base_sha: "b", head_sha: "h", start_sha: "s" });
   assert.equal(mrOf(null, "gitlab.com"), null);
+});
+
+test("while it creates, the fields are plain text: nothing can be typed in them", { skip }, async () => {
+  const h = harness({ extra: { branch: "me/pla-1-x", name: "PLA-1" } });
+  Object.assign(h.worktree, { text: "me/pla-1-x", worktrees: await h.worktreeSettings(repo, "/home/user", null, true) });
+  h.worktree.spaceName.set_value("PLA-1");
+  h.worktree.input.set_value("me/pla-1-x");
+  const inputs = (node) => (node?.input ? 1 : 0) + (node?.children ?? []).reduce((n, c) => n + inputs(c), 0);
+  assert.equal(inputs(h.worktree.render({}).node), 3);
+  h.worktree.busy = true;
+  const busy = h.worktree.render({}).node;
+  assert.equal(inputs(busy), 0);
+  assert.match(textOf(busy), /me\/pla-1-x/);
+  assert.match(textOf(busy), /PLA-1/);
 });

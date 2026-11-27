@@ -54,7 +54,7 @@ diff -ru a/mods/worktree/main.js b/mods/worktree/main.js
 +  }
 +
    field(state, focused, t) {
-     return Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground).disabled(Boolean(this.busy)).opacity(this.busy ? 0.5 : 1);
+     return this.busy ? h_flex().h(32).px(10).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_color(t.muted).opacity(0.6).child(div().truncate().child(state.value() || " ")) : Input.new(state).h(32).px(10).items_center().rounded(6).border(1).border_color(focused ? t.accent : t.input).bg(t.background).text_color(t.foreground);
    }
 @@ -416,7 +430,7 @@
      if (!r.ok) return r.err || "git worktree add failed.";
