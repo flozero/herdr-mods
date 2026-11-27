@@ -1,16 +1,16 @@
 // Linear for the Herdr app: find, read and start work on Linear issues in a window.
-// Lists: my open issues · recently opened · all (every team you belong to).
-// Typing filters what's already loaded at once and asks the server after a 0.3 s pause.
 // Wide windows preview the selected issue on the right; Enter opens it.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, h_resizable, resizable_panel } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, ScrollHandle } from "gpui-base";
 import { theme, props, closeOverlay, run, focused, panes, spaces, terminals, exec, hc, home, appHome, nextCommand, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import * as api from "./api.js";
+import { isoDay, parseDay } from "./dates.js";
 import * as Q from "./query.js";
 import { Images, splitMarkdown, splitImages, imageParts, imageUrls } from "./media.js";
 import { Store, JsonFile } from "./store.js";
+import { saveTemplate, deleteTemplate, worktreeChoices, startTask } from "./prompts.js";
 import { T, setLanguage } from "./i18n.js";
 import { Places } from "./places.js";
 import { stateIcon } from "./states.js";
@@ -22,21 +22,25 @@ import { agentArgv, agentName, askArgv } from "./agent.js";
 
 const BASE = "mods/linear";
 const ICON = `${BASE}/icons`;
-const WIDE = 760;
-const LIST_W = 420; // the list's default width beside the preview; dragging the divider changes it
-const LIST_MIN = 280, PREVIEW_MIN = 320;
+const NARROW = 640, SIDEBAR_W = 280;
 const RECENT_MAX = 30;
+const RECENT_PROJECTS = 8;
+const MORE_AHEAD = 10;
+const BOARD_MAX = 250;
+const ROW_H = 30, ROW2_H = 46, LINE_H = 22, META_H = 18, HEAD_H = 28;
 const CACHE_MAX = 400;
 const URGENT = "#eb5757";
+const STAR = "#f2c94c";
 const CLAUDE = "#D97757";
+const AGENT_COLOR = { codex: "#10A37F", gemini: "#4285F4", opencode: "#A78BFA", cursor: "#38BDF8", aider: "#22C55E", amp: "#F472B6", other: "#60A5FA" };
 const SUB_BG = "#3b82f614";
 // GitHub's pull request colors.
 const PR_COLOR = { open: "#3fb950", draft: null, merged: "#a371f7", closed: "#f85149" };
 const PR_ICON = { open: "pr", draft: "pr", merged: "pr-merged", closed: "pr-closed" };
 const REVIEW_COLOR = { approved: "#3fb950", changes: "#d29922" };
 const PRIO_ICON = { 0: "prio-none", 1: "prio-urgent", 2: "prio-3", 3: "prio-2", 4: "prio-1" };
-const TAB_IDS = ["all", "mine", "recent"];
 const VIEW_TAB = "v:";
+const NOBODY = "none";
 const isViewTab = (tab) => String(tab ?? "").startsWith(VIEW_TAB);
 const viewIdOf = (tab) => (isViewTab(tab) ? tab.slice(VIEW_TAB.length) : null);
 const IDENT_IN_TEXT = /(?:^|[^a-z0-9])([a-z][a-z0-9]*)-(\d+)(?![0-9])/gi;
@@ -44,11 +48,10 @@ const IDENT_IN_NAME = /[A-Za-z][A-Za-z0-9]*-\d+/g;
 const WATCH_LABEL = /^linear\.(watch|mr|pipeline)\.([A-Z][A-Z0-9]*-\d+)$/;
 const WATCH_RANK = { watch: 1, mr: 2, pipeline: 3 };
 const CLAUDE_ICON = "icons/claude.svg";
-const BOARD_STEP = 16, BOARD_X = 6;
 const TREE_STEP = 22, TREE_X = 7; // a sub-issue level's indent, and where its line runs (under the parent's priority icon)
 const CLOSED = new Set(["completed", "canceled", "duplicate"]);
 const SORTS = ["default", "updated", "created", "priority", "state"];
-const LAYOUTS = ["split", "list", "board"];
+const LAYOUTS = ["list", "board"];
 const BOARD_COL = 300;
 const BOARD_RANK = { triage: 0, backlog: 1, unstarted: 2, started: 3, completed: 4, canceled: 5, duplicate: 6 };
 // Board order of state types, for sorting by state: what's being worked on first, closed last.
@@ -79,6 +82,7 @@ function ago(iso) {
 // cache is one file that every copy reads first.
 const STORE = new Store(`${appHome()}/${BASE}/.cache`, exec);
 const VIEWS = new JsonFile(`${appHome()}/${BASE}/.cache`, "views.json", exec);
+const PROMPTS = new JsonFile(`${appHome()}/${BASE}/.cache`, "prompts.json", exec);
 const CLI = () => `${appHome()}/${BASE}/cli/linear-me.mjs`;
 const ASK_DENY = [
   "Edit", "Write", "NotebookEdit",
@@ -93,6 +97,7 @@ const save = (k, v) => STORE.set(k, v);
 // Cached issues keep a shortened description; opening one fetches it in full.
 const slim = (i) => (i?.description?.length > 3000 ? { ...i, description: i.description.slice(0, 3000) } : i);
 const stop = (_e, cx) => cx.stop_propagation();
+const cycleName = (c, tr) => c.name ? (c.number ? `${c.name} · ${c.number}` : c.name) : `${tr.cycle} ${c.number ?? "?"}`;
 
 export default class Linear extends View {
   init(_props, cx) {
@@ -102,23 +107,27 @@ export default class Linear extends View {
     this.branchPrefix = null;
     this.origin = props()?.origin ? this.placeOf(props().origin) : this.focusedPlace();
     this.views = [];
+    this.viewsAt = 0;
+    this.errors = [];
     this.viewData = {};
     this.viewer = null;
     this.mine = [];
-    this.all = [];
-    this.allCursor = null;
-    this.allMore = false;
+    this.peopleBy = {};
+    this.projects = { query: "", nodes: [], cursor: null, more: false };
+    this.favorites = [];
+    this.recentItems = [];
+    this.homeTab = "projects";
+    this.homeSel = 0;
     this.cache = {}; // identifier → issue
     this.recent = []; // identifiers, newest first
     this.found = []; // identifiers in the focused terminal shown on top, last mentioned first
     this.foundIds = []; // every identifier the terminal mentions, cached or not
     this.details = {}; // identifier → detail
-    this.server = []; // server filter search results
-    this.tab = "all";
-    this.query = "";
+    this.tab = "mine";
     this.sel = 0;
-    const opening = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(String(props()?.open ?? "")) ? String(props().open).toUpperCase() : null;
-    this.mode = opening ? "detail" : "list"; // list | detail
+    const given = /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(String(props()?.open ?? "")) ? String(props().open).toUpperCase() : null;
+    const opening = given ?? (props()?.open === "current" ? this.guessBranchIssue() : null);
+    this.mode = opening ? "detail" : props()?.side ? "list" : "home"; // home | list | detail
     this.stack = opening ? [opening] : []; // issues followed through relations in the detail view
     this.sc = {}; // issue id → the detail's scroll: offset, measured heights, outline state
     this.places = new Places();
@@ -141,64 +150,78 @@ export default class Linear extends View {
     this.flash = null;
     this.loading = new Set();
     this.width = 900;
-    this.listW = LIST_W;
-    this.layout = "split"; // split (list + preview) | list (the list alone, with more columns)
+    this.layout = "list";
     this.layouts = {};
     this.projectPane = {};
     this.overviews = {};
-    this.filters = []; // saved searches: [{ query }]
-    this.sort = { by: "default", asc: false }; // list order (default: the list's own, or relevance when searching)
+    this.sort = { by: "default", asc: false }; // list order (default: the list's own)
     this.hideClosed = false; // Display: leave completed, canceled and duplicate issues out of the lists
     this.nest = true; // Display: sub-issues under their parent
-    this.pop = null; // the open popover: "filter" | "display"
-    this.popField = null; // the filter menu's open field (state, assignee, …)
-    this.popNeg = false; // the filter menu adds "is not" values
+    this.pop = null;
     this.popMenu = null; // the display panel's open choice (order, closed)
-    this.confirmDel = null; // the preset whose delete waits for a second press
-    this.renaming = null; // the preset being renamed
     this.collapsed = new Set(); // parents whose sub-issues are folded in the list
     this.dataVer = 0; this.foldVer = 0; // bumped when cached issues or folds change (rows() is memoized on them)
     this.height = 700;
     this.lightbox = null; // { urls, idx }: an image shown large over the window
     this.typing = false;
+    this.finding = false;
     this.handle = cx.focus_handle();
-    this.queryGen = 0; this.previewGen = 0; this.flashGen = 0;
+    this.listScroll = ScrollHandle.new();
+    this.homeScroll = ScrollHandle.new();
+    this.wheel = {};
+    this.queryGen = 0; this.flashGen = 0;
     this.images = new Images();
 
-    // The search hint is drawn beside the input (searchBar) so it follows the language set in config.json.
-    this.input = InputState.new({ placeholder: "" });
-    this.input.on("change", (_e, cx) => this.onQuery(this.input.value(), cx));
-    this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
-    this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
-
-    this.renameInput = InputState.new({ placeholder: "" });
-    this.renameInput.on("submit", (_e, cx) => this.finishRename(cx, true));
-    this.renameInput.on("blur", (_e, cx) => { if (this.renaming !== null) this.finishRename(cx, true); });
+    this.findInput = InputState.new({ placeholder: "" });
+    this.findInput.on("change", (_e, cx) => { this.sel = 0; this.fillBoard(cx); cx.notify(); });
+    this.findInput.on("focus", (_e, cx) => { this.finding = true; this.typing = true; cx.notify(); });
+    this.findInput.on("blur", (_e, cx) => { this.finding = false; this.typing = false; cx.notify(); });
+    this.findInput.on("submit", (_e, cx) => this.activate(this.selected(), cx));
+    this.homeInput = InputState.new({ placeholder: "" });
+    this.homeInput.on("change", (_e, cx) => this.onHomeQuery(this.homeInput.value(), cx));
+    this.homeInput.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+    this.homeInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
 
     this.titleInput = InputState.new({ placeholder: "" });
     this.titleInput.on("change", (_e, cx) => cx.notify());
-    this.titleInput.on("submit", () => this.bodyDraft.focus());
+    this.titleInput.on("submit", (_e, cx) => { if (this.issueEdit?.field === "title") this.saveIssue(cx); });
     this.titleInput.on("focus", (_e, cx) => { this.editFocus = "title"; cx.notify(); });
-    this.titleInput.on("blur", (_e, cx) => { if (this.editFocus === "title") this.editFocus = null; cx.notify(); });
+    this.titleInput.on("blur", (_e, cx) => { if (this.editFocus === "title") this.editFocus = null; this.leaveEdit("title", cx); });
+    this.creating = null;
+    this.shortcuts = false;
+    this.actionsOpen = false;
+    this.starting = null;
+    this.templates = [];
+    this.startDraft = TextareaState.new({ rows: 8 });
+    this.startDraft.on("change", (_e, cx) => cx.notify());
+    this.startDraft.on("submit", (e, cx) => { if (e?.secondary) this.runStart(cx); });
+    this.templateInput = InputState.new({ placeholder: "" });
+    this.templateInput.on("submit", (_e, cx) => this.addTemplate(cx));
+    this.newTitle = InputState.new({ placeholder: "" });
+    this.newTitle.on("change", (_e, cx) => cx.notify());
+    this.newTitle.on("submit", () => this.newBody.focus());
+    this.newTitle.on("focus", () => { if (this.creating) this.creating.field = "title"; });
+    this.newBody = TextareaState.new({ rows: 8 });
+    this.newBody.on("change", (_e, cx) => cx.notify());
+    this.newBody.on("submit", (e, cx) => { if (e?.secondary) this.createIssue(cx); });
+    this.newBody.on("focus", () => { if (this.creating) this.creating.field = "body"; });
     this.bodyDraft = TextareaState.new({ rows: 10 });
     this.bodyDraft.set_auto_grow(8, 40);
     this.bodyDraft.on("change", (_e, cx) => cx.notify());
     this.bodyDraft.on("submit", (e, cx) => { if (e?.secondary) this.saveIssue(cx); });
     this.bodyDraft.on("focus", (_e, cx) => { this.editFocus = "body"; cx.notify(); });
-    this.bodyDraft.on("blur", (_e, cx) => { if (this.editFocus === "body") this.editFocus = null; cx.notify(); });
+    this.bodyDraft.on("blur", (_e, cx) => { if (this.editFocus === "body") this.editFocus = null; this.leaveEdit("body", cx); });
 
     this.assignInput = InputState.new({ placeholder: "" });
     this.assignInput.on("change", (_e, cx) => { if (this.assignPick) this.assignPick.sel = 0; cx.notify(); });
     this.assignInput.on("submit", (_e, cx) => { const list = this.assignChoices(); this.pickAssignee(list[Math.min(this.assignPick?.sel ?? 0, list.length - 1)], cx); });
-    this.popInput = InputState.new({ placeholder: "" });
-    this.popInput.on("change", (_e, cx) => cx.notify());
-    this.popInput.on("submit", (_e, cx) => {
-      const typed = this.pop === "views" ? this.popInput.value() : "";
-      const slug = api.viewSlug(typed), pslug = slug ? null : api.projectSlug(typed);
-      if (slug) this.addView(slug, cx);
-      else if (pslug) this.addView(pslug, cx, "project");
-    });
-
+    // Priority, labels, project, cycle and due date: one picker, its search box doubles as the date field.
+    this.propPick = null;
+    this.teamCycles = {};
+    this.propInput = InputState.new({ placeholder: "" });
+    this.propInput.on("change", (_e, cx) => { if (this.propPick) this.propPick.sel = 0; if (this.propPick?.kind === "project") this.searchProjects(cx); cx.notify(); });
+    this.propInput.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
+    this.propInput.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     cx.spawn(async (cx) => {
       // Read the focused terminal right away, so its issues are on the first frame and the list doesn't jump.
       const termText = this.readTerminal();
@@ -216,24 +239,26 @@ export default class Linear extends View {
         api.people().then((list) => { if (list.length) { this.people = list; save("people", list); save("peopleAt", Date.now()); } }).catch(() => {});
       }
       this.mine = load("mine", []);
-      this.all = load("all", []);
+      this.peopleBy = load("peopleBy", {});
       this.cache = load("cache", {});
       this.recent = load("recent", []);
-      this.tab = load("tab", "all");
+      this.tab = isViewTab(load("tab", "mine")) ? load("tab", "mine") : "mine";
       this.details = load("details", {});
-      this.listW = load("listW", LIST_W);
-      this.layout = load("layout", "split");
+      this.layout = LAYOUTS.includes(load("layout", "list")) ? load("layout", "list") : "list";
       this.layouts = load("layouts", {});
       if (LAYOUTS.includes(this.layouts[load("tab", "")])) this.layout = this.layouts[load("tab", "")];
-      this.filters = load("filters", []);
       this.sort = { by: "default", asc: false, ...load("sort", {}) };
       this.hideClosed = load("hideClosed", false);
       this.nest = load("nest", this.config.nestSubIssues !== false);
       this.collapsed = new Set(load("collapsed", []));
-      this.views = await VIEWS.read(null);
-      if (!this.views) { this.views = load("myViews", []); if (this.views.length) VIEWS.write(this.views).catch(() => {}); }
+      this.favorites = load("favorites", null) ?? ((await VIEWS.read(null)) ?? load("myViews", [])).map((v) => (v.kind === "project" ? api.projectOf(v) : api.viewItem(v)));
+      this.recentItems = load("recentItems", []);
+      this.templates = await PROMPTS.read([]);
+      this.homeTab = load("homeTab", "projects");
+      this.projects = { ...this.projects, nodes: load("projects", []) };
+      this.views = load("views", []);
       this.viewData = load("viewData", {});
-      if (isViewTab(this.tab) && !this.views.some((v) => v.id === viewIdOf(this.tab))) this.tab = "all";
+      if (isViewTab(this.tab) && !this.viewOf(this.tab)) this.tab = "mine";
       this.cleanCache();
       if (this.config.terminalIssues !== false) {
         this.foundIds = Q.issueRefs(await termText, this.teamKeys());
@@ -242,8 +267,9 @@ export default class Linear extends View {
       if (props()?.open === "current" && this.viewer) this.openCurrent(cx);
       else if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(String(props()?.open ?? ""))) { this.openedCurrent = true; this.openDetail(String(props().open).toUpperCase(), cx, true); }
       cx.notify();
-      this.focusList();
+      if (this.mode === "home") this.focusHome(); else this.focusList();
       this.fetchFound(cx);
+      if (this.mode === "home") { this.loadProjects(cx); this.loadViews(cx); }
       // The shown issue's comments first: requests queue in the runtime, and the lists are big.
       const shown = this.shownId();
       if (shown) await this.loadDetail(cx, shown, true);
@@ -259,8 +285,7 @@ export default class Linear extends View {
     cx.timer.every(1000, (cx) => {
       if (spaces().some((s) => s.tabs.some((tb) => tb.working_since && tb.name.match(IDENT_IN_NAME)))) this.redraw(cx);
     });
-    cx.timer.after(400, () => { if (!this.typing) this.focusList(); });
-    // From keys.json or `herdr-app do`: linear.search[:text], linear.refresh, linear.close, linear.layout[:split|list], linear.open:ENG-123
+    cx.timer.after(400, () => { if (this.mode === "home") this.focusHome(); else if (!this.typing) this.focusList(); });
     // The loop must end when nextCommand() stops waiting (an empty answer after a reload or close),
     // or it spins without ever yielding and freezes the whole window.
     cx.spawn(async (cx) => {
@@ -272,16 +297,11 @@ export default class Linear extends View {
         if (Date.now() - since > 1000) { burst = 0; since = Date.now(); }
         if (++burst > 50) return;
         const [name, arg] = String(c).split(/[:\s]+/, 2);
-        if (name === "search") {
-          this.mode = "list"; this.stack = []; this.focusSearch();
-          // linear.search:<text> types the search (the rest of the command, spaces included).
-          const text = /^search[:\s](.*)$/s.exec(String(c))?.[1];
-          if (text !== undefined) { this.input.set_value(text); this.onQuery(text, cx); }
-        }
+        if (name === "home") { if (!props()?.side) this.goHome(cx); }
         else if (name === "refresh") this.reload(cx);
         else if (name === "close") this.dismiss();
         else if (name === "sort" && SORTS.includes(arg)) this.setSort(arg, cx);
-        else if (name === "filter" || name === "display") this.openPop(this.pop === name ? null : name, cx);
+        else if (name === "display") this.openPop(this.pop === name ? null : name, cx);
         else if (name === "layout") this.setLayout(LAYOUTS.includes(arg) ? arg : this.nextLayout(), cx);
         else if (name === "open" && arg) this.openDetail(arg.toUpperCase(), cx, true);
         else if (name === "comments") { const id = this.shownId(); if (id) this.toggleComments(id, cx); }
@@ -289,7 +309,6 @@ export default class Linear extends View {
         else if (name === "image") { const g = this.gallery(); if (g.length) this.openLightbox(g[0], cx); }
         else if (name === "work") { const id = this.shownId(); const i = id && (this.details[id]?.issue ?? this.cache[id]); if (i) this.work(i, cx); }
         else if (name === "current") this.openCurrent(cx);
-        else if (name === "views") this.openPop(this.pop === "views" ? null : "views", cx);
         cx.notify();
       }
     });
@@ -340,11 +359,22 @@ export default class Linear extends View {
       if (this.status?.level === "error") this.status = null;
       return r;
     } catch (e) {
-      this.status = { text: T().err[e?.kind] ?? String(e?.message ?? e), level: "error" };
+      this.logError(label, e);
+      if (e?.kind === "auth") this.canWrite = false;
+      this.status = { text: T().err[e?.kind] ?? String(e?.message ?? e), level: "error", kind: e?.kind };
       return undefined;
     } finally {
       this.loading.delete(label); this.redraw(cx);
     }
+  }
+
+  logError(label, e) {
+    const detail = [e?.kind && `kind: ${e.kind}`, String(e?.message ?? e), e?.stack].filter(Boolean).join("\n");
+    this.errors = [...this.errors.slice(-19), { at: new Date().toISOString(), label, detail }];
+  }
+
+  errorReport() {
+    return this.errors.map((x) => `[${x.at}] ${x.label}\n${x.detail}`).join("\n\n");
   }
 
   // Background redraws wait while the left button is held on the detail: a redraw in the middle of a
@@ -419,9 +449,9 @@ export default class Linear extends View {
     this.sending = true;
     this.say(T().saving, cx);
     try {
-      await this.linearMe(tool, args);
-      this.say(done, cx, "success");
-      return true;
+      const value = await this.linearMe(tool, args);
+      this.say(typeof done === "function" ? done(value) : done, cx, "success");
+      return value ?? true;
     } catch (e) {
       this.say(`${T().writeFailed}: ${e?.message ?? e}`, cx, "error");
       return false;
@@ -580,20 +610,30 @@ export default class Linear extends View {
     });
   }
 
-  editIssue(id, cx) {
+  // The title or the description turns into a field where it is, as in Linear. Leaving the field saves.
+  editIssue(id, cx, field = "body") {
     if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
-    if (this.issueEdit?.id === id) { cx.timer.after(0, () => this.titleInput.focus()); return; }
-    cx.spawn(async (cx) => {
-      await this.loadDetail(cx, id, true);
-      const issue = this.details[id]?.issue;
+    const focus = () => cx.timer.after(0, () => (field === "title" ? this.titleInput : this.bodyDraft).focus());
+    if (this.issueEdit?.id === id && this.issueEdit.field === field && !this.issueEdit.saving) { focus(); return; }
+    const start = () => {
+      const issue = this.details[id]?.issue ?? this.cache[id];
       if (!issue) return;
-      this.issueEdit = { id, title: issue.title ?? "", description: issue.description ?? "" };
+      this.issueEdit = { id, field, title: issue.title ?? "", description: issue.description ?? "" };
       this.titleInput.set_value(this.issueEdit.title);
       this.bodyDraft.set_value(this.issueEdit.description);
-      this.jump(id, "top", cx);
-      cx.timer.after(0, () => this.titleInput.focus());
+      focus();
       cx.notify();
-    });
+    };
+    if (this.details[id]) start();
+    else cx.spawn(async (cx) => { await this.loadDetail(cx, id); start(); });
+  }
+
+  // A field lost the focus: save what changed, or just close it.
+  leaveEdit(field, cx) {
+    const e = this.issueEdit;
+    if (!e || e.field !== field || e.saving) { cx.notify(); return; }
+    if (this.issueEdited()) this.saveIssue(cx);
+    else this.cancelEdit(cx, false);
   }
 
   issueEdited() {
@@ -601,33 +641,252 @@ export default class Linear extends View {
     return Boolean(e) && (this.titleInput.value().trim() !== e.title || this.bodyDraft.value() !== e.description);
   }
 
-  cancelEdit(cx) {
+  cancelEdit(cx, refocus = true) {
     this.issueEdit = null;
     this.editFocus = null;
-    this.focusList();
+    if (refocus) this.focusList();
     cx.notify();
   }
 
   saveIssue(cx) {
     const e = this.issueEdit;
-    if (!e || this.sending) return;
+    if (!e || e.saving || this.sending) return;
     const title = this.titleInput.value().trim(), description = this.bodyDraft.value();
-    if (!title) { this.say(T().titleEmpty, cx); return; }
+    if (!title) { this.say(T().titleEmpty, cx); this.titleInput.set_value(e.title); this.cancelEdit(cx); return; }
     if (!this.issueEdited()) { this.cancelEdit(cx); return; }
     const args = { id: e.id, ...(title !== e.title ? { title } : {}), ...(description !== e.description ? { description } : {}) };
+    // Shown right away; Linear's answer replaces it.
+    const issue = this.details[e.id]?.issue;
+    if (issue) { if (args.title) issue.title = title; if ("description" in args) issue.description = description; }
+    e.saving = true;
+    cx.notify();
     cx.spawn(async (cx) => {
-      if (!(await this.write("save_issue", args, T().issueSaved(e.id), cx))) return;
-      this.cancelEdit(cx);
+      const ok = await this.write("save_issue", args, T().issueSaved(e.id), cx);
+      if (this.issueEdit === e) {
+        if (ok) this.cancelEdit(cx, this.editFocus !== null);
+        else { e.saving = false; cx.notify(); }
+      }
       await this.loadDetail(cx, e.id, true);
-      this.refresh(cx, false);
+      if (ok) this.refresh(cx, false);
       cx.notify();
     });
+  }
+
+  openCreate(cx) {
+    if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
+    if (!(this.viewer?.teams?.nodes ?? []).length) { this.say(T().noTeam, cx); return; }
+    this.creating = { ...this.createContext(), mine: load("newMine", true) };
+    cx.timer.after(0, () => this.newTitle.focus());
+    cx.notify();
+  }
+
+  createContext() {
+    const teams = this.viewer?.teams?.nodes ?? [];
+    const teamBy = (key) => teams.find((tm) => tm.id === key || tm.key === key)?.id ?? null;
+    const issues = this.rows().filter((r) => r.kind === "issue").map((r) => r.issue);
+    const common = (keyOf) => {
+      if (issues.length < 2) return [];
+      const counts = new Map();
+      for (const issue of issues) for (const [key, val] of keyOf(issue)) counts.set(key, { val, n: (counts.get(key)?.n ?? 0) + 1 });
+      return [...counts.values()].filter((x) => x.n === issues.length).map((x) => x.val);
+    };
+    const id = this.shownId(), shown = id ? (this.details[id]?.issue ?? this.cache[id]) : null;
+    const view = this.viewOf(this.tab), proj = this.projectTab();
+    const team = [view?.team?.id, view?.team?.key, ...common((i) => [[i.team?.key, i.team?.key]]), shown?.team?.id, shown?.team?.key, load("newTeam", null)]
+      .map((x) => x && teamBy(x)).find(Boolean) ?? teams[0].id;
+    const project = proj ? { id: proj.id, name: proj.name } : common((i) => (i.project ? [[i.project.id ?? i.project.name, i.project]] : []))[0] ?? null;
+    const labels = [...new Set(common((i) => (i.labels?.nodes ?? []).map((l) => [l.name, l.name])))];
+    return { team, project, labels, priority: null };
+  }
+
+  closeCreate(cx) {
+    this.creating = null;
+    this.focusList();
+    cx.notify();
+  }
+
+  createTeam(step, cx) {
+    const teams = this.viewer?.teams?.nodes ?? [], c = this.creating;
+    const n = teams.findIndex((tm) => tm.id === c.team);
+    c.team = teams[(n + step + teams.length) % teams.length].id;
+    cx.notify();
+  }
+
+  createIssue(cx) {
+    const c = this.creating;
+    if (!c || this.sending) return;
+    const title = this.newTitle.value().trim(), description = this.newBody.value().trim();
+    if (!title) { this.say(T().titleEmpty, cx); return; }
+    save("newTeam", c.team); save("newMine", c.mine);
+    const args = { team: c.team, title, ...(description ? { description } : {}), ...(c.mine ? { assignee: "me" } : {}),
+      ...(c.project ? { project: c.project.id ?? c.project.name } : {}), ...(c.labels.length ? { labels: c.labels } : {}), ...(c.priority ? { priority: c.priority } : {}) };
+    const created = (v) => v?.identifier ?? v?.issue?.identifier ?? /\b[A-Z][A-Z0-9]*-\d+\b/.exec(typeof v === "string" ? v : JSON.stringify(v ?? ""))?.[0] ?? null;
+    cx.spawn(async (cx) => {
+      const value = await this.write("save_issue", args, (v) => T().issueCreated(created(v)), cx);
+      if (!value) return;
+      this.newTitle.set_value(""); this.newBody.set_value("");
+      this.closeCreate(cx);
+      const id = created(value);
+      if (id) this.openDetail(id, cx, true);
+      this.refresh(cx, false);
+    });
+  }
+
+  createKey(k, cx) {
+    if (k === "cmd-enter" || k === "ctrl-enter") this.createIssue(cx);
+    else if (k === "escape") this.closeCreate(cx);
+    else if (k === "ctrl-t") this.createTeam(1, cx);
+    else if (k === "ctrl-shift-t") this.createTeam(-1, cx);
+    else if (k === "ctrl-m") { this.creating.mine = !this.creating.mine; cx.notify(); }
+    else if (k === "tab" && this.creating.field === "title") this.newBody.focus();
+    else return false;
+    return true;
+  }
+
+  openStart(issue, cx) {
+    this.starting = { issue, repo: 0, naming: false };
+    this.startDraft.set_value("");
+    this.templateInput.set_value("");
+    cx.timer.after(0, () => this.startDraft.focus());
+    cx.spawn(async (cx) => { await this.places.scanAll(); cx.notify(); });
+    cx.notify();
+  }
+
+  closeStart(cx) {
+    this.starting = null;
+    this.focusList();
+    cx.notify();
+  }
+
+  startRepos() {
+    return this.starting ? worktreeChoices(this.places.choices(this.starting.issue)) : [];
+  }
+
+  saveTemplates(list, cx) {
+    this.templates = list;
+    cx.spawn(async (cx) => {
+      try { await PROMPTS.write(list); } catch (e) { this.say(`${T().templateNotSaved}: ${e?.message ?? e}`, cx, "error"); }
+    });
+    cx.notify();
+  }
+
+  addTemplate(cx) {
+    const name = this.templateInput.value().trim(), text = this.startDraft.value();
+    const next = saveTemplate(this.templates, name, text);
+    if (next === this.templates) { this.say(name ? T().templateEmpty : T().templateNoName, cx); return; }
+    this.saveTemplates(next, cx);
+    this.starting.naming = false;
+    this.say(T().templateSaved(name), cx, "success");
+    cx.timer.after(0, () => this.startDraft.focus());
+  }
+
+  runStart(cx) {
+    const s = this.starting;
+    const c = this.startRepos()[s?.repo ?? 0];
+    if (!s || !c || this.sending) return;
+    this.sending = true;
+    this.say(T().starting, cx);
+    const prompt = this.startDraft.value();
+    cx.spawn(async (cx) => {
+      try {
+        const task = startTask(prompt, await this.taskFor(s.issue, Boolean(c.machine), cx));
+        await this.places.start(c, { name: s.issue.identifier, argv: agentArgv(this.config), task });
+        if (this.starting === s) { this.starting = null; this.dismiss(); }
+      } catch (e) {
+        this.status = { text: `${T().pickFailed}: ${e?.message ?? e}`, level: "error" };
+      } finally {
+        this.sending = false;
+        cx.notify();
+      }
+    });
+  }
+
+  startKey(k, cx) {
+    const s = this.starting, n = this.startRepos().length;
+    if (k === "cmd-enter" || k === "ctrl-enter") this.runStart(cx);
+    else if (k === "escape" && s.naming) { s.naming = false; this.startDraft.focus(); cx.notify(); }
+    else if (k === "escape") this.closeStart(cx);
+    else if ((k === "ctrl-n" || k === "ctrl-p") && n > 1) { s.repo = (s.repo + (k === "ctrl-n" ? 1 : n - 1)) % n; cx.notify(); }
+    else return false;
+    return true;
+  }
+
+  startView(t) {
+    const tr = T(), s = this.starting, repos = this.startRepos();
+    const chip = (id, on, label, action) => h_flex().id(id).h(24).px(9).items_center().rounded(12).border_1().text_size(11.5).cursor_pointer()
+      .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
+      .hover((st) => st.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
+    const where = repos.length > 1
+      ? h_flex().gap(6).flex_wrap().items_center().child(div().text_size(11.5).text_color(t.dim).child(tr.repo))
+        .children(repos.map((c, n) => chip(`st-repo-${n}`, n === s.repo, c.repo ?? c.folder, (cx) => { s.repo = n; cx.notify(); })))
+      : div().text_size(11.5).text_color(t.dim).child(repos.length ? `${tr.repo} ${repos[0].repo ?? repos[0].folder}` : this.places.scanning() ? tr.scanning : tr.noWorktree);
+    const templates = v_flex().gap(4)
+      .child(div().text_size(11).font_semibold().text_color(t.dim).child(tr.templates))
+      .child(this.templates.length
+        ? h_flex().gap(6).flex_wrap().items_center().children(this.templates.map((x, n) => h_flex().id(`st-tpl-${n}`).h(24).pl(9).pr(3).gap(4).items_center()
+          .rounded(12).border_1().border_color(t.border).text_size(11.5)
+          .child(div().id(`st-tpl-use-${n}`).cursor_pointer().hover((st) => st.text_color(t.accent)).on_mouse_down("left", stop)
+            .on_click((_e, cx) => { this.startDraft.set_value(x.text); this.startDraft.focus(); cx.notify(); }).child(x.name))
+          .child(this.miniButton(t, `st-tpl-del-${n}`, "×", (cx) => this.saveTemplates(deleteTemplate(this.templates, x.name), cx)))))
+        : div().text_size(12).text_color(t.dim).child(tr.noTemplates));
+    const canStart = repos.length > 0 && !this.sending;
+    const panel = v_flex().id("start-agent").w(560).max_w_full().gap(12).p(16).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child(div().text_size(14).font_semibold().child(tr.startTitle(s.issue.identifier)))
+      .child(where)
+      .child(div().w_full().min_w(0).rounded(8).border_1().bg(t.background).border_color(t.border)
+        .child(Textarea.new(this.startDraft).w_full()))
+      .child(templates)
+      .when(s.naming, (el) => el.child(h_flex().gap(8).items_center()
+        .child(h_flex().flex_1().h(30).px(10).items_center().rounded(8).border_1().bg(t.background).border_color(t.accent)
+          .child(Input.new(this.templateInput).flex_1().h_full()))
+        .child(this.button(t, "st-tpl-save", tr.save, (cx) => this.addTemplate(cx), true))))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child(tr.startHint))
+        .when(!s.naming, (el) => el.child(this.button(t, "st-tpl", tr.saveTemplate, (cx) => {
+          if (!this.startDraft.value().trim()) { this.say(tr.templateEmpty, cx); return; }
+          s.naming = true; cx.timer.after(0, () => this.templateInput.focus()); cx.notify();
+        })))
+        .child(this.button(t, "st-cancel", tr.cancel, (cx) => this.closeStart(cx)))
+        .child(this.button(t, "st-go", this.sending ? tr.starting : tr.start, (cx) => this.runStart(cx), canStart)));
+    return h_flex().absolute().inset_0().items_center().justify_center().bg("#00000066")
+      .child(div().id("start-back").absolute().inset_0().on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.closeStart(cx); }))
+      .child(panel);
+  }
+
+  createView(t) {
+    const tr = T(), c = this.creating, teams = this.viewer?.teams?.nodes ?? [];
+    const chip = (id, on, label, action) => h_flex().id(id).h(24).px(9).items_center().rounded(12).border_1().text_size(11.5).cursor_pointer()
+      .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
+      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
+    const panel = v_flex().id("new-issue").w(560).max_w_full().gap(10).p(16).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child(div().text_size(14).font_semibold().child(tr.newIssue))
+      .child(h_flex().gap(6).flex_wrap().items_center()
+        .children(teams.map((tm) => chip(`nt-${tm.id}`, tm.id === c.team, tm.key, (cx) => { c.team = tm.id; cx.notify(); })))
+        .child(div().flex_1())
+        .child(chip("n-mine", c.mine, tr.assignedToMe, (cx) => { c.mine = !c.mine; cx.notify(); })))
+      .when(Boolean(c.project || c.labels.length || c.priority), (el) => el.child(h_flex().gap(6).flex_wrap().items_center()
+        .when(Boolean(c.project), (el) => el.child(chip("n-project", true, `${tr.projectWord} ${c.project.name}  ×`, (cx) => { c.project = null; cx.notify(); })))
+        .when(Boolean(c.priority), (el) => el.child(chip("n-prio", true, `${tr.priority[c.priority]}  ×`, (cx) => { c.priority = null; cx.notify(); })))
+        .children(c.labels.map((name) => chip(`n-l-${name}`, true, `${name}  ×`, (cx) => { c.labels = c.labels.filter((x) => x !== name); cx.notify(); })))))
+      .child(h_flex().h(36).px(10).items_center().rounded(8).border_1().bg(t.background).border_color(t.border)
+        .child(Input.new(this.newTitle).flex_1().h_full().text_size(15)))
+      .child(div().w_full().min_w(0).rounded(8).border_1().bg(t.background).border_color(t.border)
+        .child(Textarea.new(this.newBody).w_full()))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child(tr.newIssueHint))
+        .child(this.button(t, "n-cancel", tr.cancel, (cx) => this.closeCreate(cx)))
+        .child(this.button(t, "n-create", this.sending ? tr.saving : tr.create, (cx) => this.createIssue(cx), Boolean(this.newTitle.value().trim()) && !this.sending)));
+    return h_flex().absolute().inset_0().items_center().justify_center().bg("#00000066")
+      .child(div().id("new-back").absolute().inset_0().on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.closeCreate(cx); }))
+      .child(panel);
   }
 
   openAssign(id, cx) {
     if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
     if (this.assignPick?.id === id) { this.closeAssign(cx); return; }
-    this.statePick = null;
+    this.statePick = null; this.propPick = null;
     this.assignPick = { id, sel: 0 };
     this.assignInput.set_value("");
     cx.timer.after(0, () => this.assignInput.focus());
@@ -683,6 +942,7 @@ export default class Linear extends View {
     const issue = this.details[id]?.issue ?? this.cache[id];
     if (!issue?.team?.id) return;
     if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
+    this.assignPick = null; this.propPick = null;
     this.statePick = { id, states: null, sel: 0 };
     cx.notify();
     cx.spawn(async (cx) => {
@@ -719,6 +979,136 @@ export default class Linear extends View {
     return true;
   }
 
+  // ── Property picker ───────────────────────────────────
+  // kind: priority | labels | project | cycle | due. `items` is null while loading.
+
+  openProp(id, kind, cx) {
+    const issue = this.details[id]?.issue ?? this.cache[id];
+    if (!issue) return;
+    if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
+    if (this.propPick?.id === id && this.propPick.kind === kind) { this.closeProp(cx); return; }
+    this.statePick = null; this.assignPick = null;
+    this.propPick = { id, kind, items: kind === "priority" || kind === "due" ? [] : null, sel: 0, found: null };
+    this.propInput.set_value("");
+    cx.timer.after(0, () => this.propInput.focus());
+    cx.notify();
+    const team = issue.team?.id;
+    const load = (fn) => cx.spawn(async (cx) => {
+      const items = await this.call(cx, kind, fn);
+      if (this.propPick?.id !== id || this.propPick.kind !== kind) return;
+      this.propPick.items = items ?? [];
+      cx.notify();
+    });
+    if (kind === "labels") load(() => api.teamLabels(team));
+    else if (kind === "cycle") load(async () => (this.teamCycles[team] = await api.teamCycles(team)));
+    else if (kind === "project") this.searchProjects(cx);
+  }
+
+  closeProp(cx) {
+    this.propPick = null;
+    this.focusList();
+    cx.notify();
+  }
+
+  searchProjects(cx) {
+    const p = this.propPick, q = this.propInput.value().trim();
+    if (!p || p.kind !== "project" || p.found === q) return;
+    p.found = q;
+    cx.spawn(async (cx) => {
+      const r = await this.call(cx, "projects", () => api.projects(q));
+      if (this.propPick !== p || p.found !== q) return;
+      p.items = r?.nodes ?? [];
+      cx.notify();
+    });
+  }
+
+  // The rows the picker shows: { key, label, color?, icon?, on?, value }.
+  propChoices() {
+    const p = this.propPick;
+    if (!p) return [];
+    const tr = T(), issue = this.details[p.id]?.issue ?? this.cache[p.id];
+    const q = this.propInput.value().trim().toLowerCase();
+    const match = (r) => !q || r.label.toLowerCase().includes(q);
+    if (p.kind === "priority") {
+      return [0, 1, 2, 3, 4].map((n) => ({ key: `p${n}`, label: n ? tr.priority[n] : tr.noPriority, prio: n, on: (issue?.priority ?? 0) === n, value: n })).filter(match);
+    }
+    if (p.kind === "due") {
+      const days = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return isoDay(d); };
+      const friday = (5 - new Date().getDay() + 7) % 7 || 7;
+      const monday = (8 - new Date().getDay()) % 7 || 7;
+      const typed = parseDay(this.propInput.value());
+      const rows = [
+        typed && { key: "typed", label: typed, value: typed },
+        { key: "today", label: `${tr.dueToday} · ${days(0)}`, value: days(0) },
+        { key: "tomorrow", label: `${tr.dueTomorrow} · ${days(1)}`, value: days(1) },
+        { key: "friday", label: `${tr.dueFriday} · ${days(friday)}`, value: days(friday) },
+        { key: "monday", label: `${tr.dueNextWeek} · ${days(monday)}`, value: days(monday) },
+        { key: "2w", label: `${tr.dueTwoWeeks} · ${days(14)}`, value: days(14) },
+        issue?.dueDate && { key: "none", label: tr.dueClear, value: null, none: true },
+      ].filter(Boolean);
+      return typed ? rows : rows.filter(match);
+    }
+    if (!p.items) return [];
+    if (p.kind === "labels") {
+      const mine = new Set((issue?.labels?.nodes ?? []).map((l) => l.name));
+      return p.items.map((l) => ({ key: l.id, label: l.group ? `${l.group} › ${l.name}` : l.name, name: l.name, color: l.color, on: mine.has(l.name), value: l }))
+        .filter(match).sort((a, b) => Number(b.on) - Number(a.on)).slice(0, 60);
+    }
+    if (p.kind === "project") {
+      const rows = p.items.map((x) => ({ key: x.id, label: x.name, color: x.color, on: issue?.project?.id === x.id || issue?.project?.name === x.name, value: x }));
+      return issue?.project && !q ? [{ key: "none", label: tr.noProject, value: null, none: true }, ...rows] : rows;
+    }
+    if (p.kind === "cycle") {
+      const rows = p.items.map((c) => ({ key: c.id, label: cycleName(c, tr), on: issue?.cycle?.id === c.id, value: c })).filter(match);
+      return issue?.cycle && !q ? [{ key: "none", label: tr.noCycle, value: null, none: true }, ...rows] : rows;
+    }
+    return [];
+  }
+
+  pickProp(row, cx) {
+    const p = this.propPick;
+    if (!p || !row) return;
+    const tr = T(), id = p.id, d = this.details[id], issue = d?.issue ?? this.cache[id];
+    let args, done;
+    if (p.kind === "labels") {
+      // Several labels in a row: the picker stays open and the issue changes right away.
+      const name = row.name, on = !row.on;
+      const nodes = issue.labels?.nodes ?? [];
+      issue.labels = { nodes: on ? [...nodes, { id: row.value.id, name, color: row.value.color }] : nodes.filter((l) => l.name !== name) };
+      args = on ? { id, addLabels: [row.value.id] } : { id, removeLabels: [row.value.id] };
+      done = on ? tr.labelOn(id, name) : tr.labelOff(id, name);
+      cx.notify();
+    } else {
+      this.closeProp(cx);
+      if (row.on) return;
+      if (p.kind === "priority") { args = { id, priority: row.value }; done = tr.prioritySet(id, row.value ? tr.priority[row.value] : tr.noPriority); }
+      else if (p.kind === "project") { args = { id, project: row.value ? row.value.id : null }; done = tr.projectSet(id, row.value?.name ?? tr.noProject); }
+      else if (p.kind === "cycle") { args = { id, cycle: row.value ? row.value.id : null }; done = tr.cycleSet(id, row.value ? cycleName(row.value, tr) : tr.noCycle); }
+      else if (p.kind === "due") { args = { id, dueDate: row.value }; done = tr.dueSet(id, row.value ?? tr.noDue); }
+    }
+    // Label clicks can come faster than Linear answers: the saves go one after the other.
+    cx.spawn((cx) => (this.propSaves = (this.propSaves ?? Promise.resolve()).then(async () => {
+      const ok = await this.write("save_issue", args, done, cx);
+      await this.loadDetail(cx, id, true);
+      if (ok) this.refresh(cx, false);
+    }).catch(() => {})));
+  }
+
+  propKey(k, cx) {
+    const p = this.propPick;
+    if (!p) return false;
+    if (k === "escape") { this.closeProp(cx); return true; }
+    const list = this.propChoices(), n = list.length;
+    if (!n) return false;
+    p.sel = Math.min(p.sel, n - 1);
+    if (k === "down" || k === "ctrl-n" || k === "tab") p.sel = (p.sel + 1) % n;
+    else if (k === "up" || k === "ctrl-p" || k === "shift-tab") p.sel = (p.sel + n - 1) % n;
+    else if (k === "enter") { this.pickProp(list[p.sel], cx); return true; }
+    else return false;
+    cx.notify();
+    return true;
+  }
+
   async findMe() {
     const me = await api.viewer();
     if (!me) throw new Error(T().noUser);
@@ -734,30 +1124,23 @@ export default class Linear extends View {
       this.call(cx, "viewer", () => this.findMe()).then((v) => { if (v) { this.viewer = v; save("viewer", v); } });
     }
     const viewId = viewIdOf(this.tab);
-    const [mine, page] = await Promise.all([
+    const [mine] = await Promise.all([
       this.call(cx, "mine", () => api.myIssues(this.viewer.id)),
-      this.call(cx, "all", () => api.teamIssues(this.teamIds(), null)),
       viewId ? this.loadView(cx, viewId) : null,
     ]);
     if (mine) { this.mine = mine; save("mine", mine.map(slim)); this.remember(mine); }
-    if (page) {
-      // Keep pages loaded with "Load more"; replace only the first page.
-      const fresh = new Set(page.nodes.map((i) => i.id));
-      this.all = [...page.nodes, ...(first ? [] : this.all.slice(api.PAGE_SIZE).filter((i) => !fresh.has(i.id)))];
-      if (first) { this.allCursor = page.pageInfo.endCursor; this.allMore = page.pageInfo.hasNextPage; }
-      save("all", this.all.slice(0, api.PAGE_SIZE).map(slim)); this.remember(page.nodes);
-    }
     const shown = this.shownId();
     if (shown) this.loadDetail(cx, shown, true);
-    if (this.query) this.searchServer(cx, this.query);
+    if (this.mode === "home") { this.loadProjects(cx); this.loadViews(cx); }
     this.redraw(cx);
+    this.fillBoard(cx);
   }
 
   async loadView(cx, viewId, more = false) {
     if (this.loading.has(`v:${viewId}`)) return;
     const have = this.viewData[viewId];
     if (more && !have?.more) return;
-    const isProject = this.views?.find((v) => v.id === viewId)?.kind === "project";
+    const isProject = this.viewOf(`${VIEW_TAB}${viewId}`)?.kind === "project";
     const page = await this.call(cx, `v:${viewId}`, () => (isProject ? api.projectIssues : api.viewIssues)(viewId, more ? have.cursor : null));
     if (!page) return;
     const fresh = new Set(page.nodes.map((i) => i.id));
@@ -768,6 +1151,145 @@ export default class Linear extends View {
       .map(([k, v]) => [k, { ...v, nodes: v.nodes.slice(0, api.PAGE_SIZE).map(slim) }])));
     this.remember(page.nodes);
     this.redraw(cx);
+    this.fillBoard(cx);
+  }
+
+  goHome(cx) {
+    this.mode = "home"; this.stack = []; this.pop = null; this.pick = null;
+    this.focusHome();
+    this.loadProjects(cx);
+    this.loadViews(cx);
+    cx.notify();
+  }
+
+  goList(tab, cx) {
+    this.mode = "list";
+    this.setTab(tab ?? "mine", cx);
+    this.focusList();
+  }
+
+  onHomeQuery(_text, cx) {
+    this.homeSel = 0;
+    const mine = ++this.queryGen;
+    cx.timer.after(300, (cx) => { if (mine === this.queryGen) this.loadProjects(cx); });
+    cx.notify();
+  }
+
+  async loadProjects(cx, more = false) {
+    const query = this.homeInput.value().trim();
+    const have = this.projects;
+    if (more && (!have.more || have.query !== query)) return;
+    const key = more ? `projects:${query}:${have.cursor}` : `projects:${query}`;
+    if (this.loading.has(key)) return;
+    const page = await this.call(cx, key, () => api.projects(query, more ? have.cursor : null));
+    if (!page || this.homeInput.value().trim() !== query) return;
+    const nodes = more ? [...have.nodes, ...page.nodes.filter((p) => !have.nodes.some((x) => x.id === p.id))] : page.nodes;
+    this.projects = { query, nodes, cursor: page.cursor, more: page.more };
+    if (!query) save("projects", nodes.slice(0, api.PAGE_SIZE));
+    this.freshen(page.nodes);
+    this.redraw(cx);
+  }
+
+  async loadViews(cx) {
+    if (Date.now() - this.viewsAt < this.config.refreshSeconds * 1000 || this.loading.has("views")) return;
+    const views = await this.call(cx, "views", () => api.customViews());
+    if (!views) return;
+    this.views = views; this.viewsAt = Date.now(); save("views", views);
+    this.freshen(views);
+    this.redraw(cx);
+  }
+
+  freshen(list) {
+    const fresh = new Map(list.map((x) => [x.id, x]));
+    const update = (items) => items.map((x) => fresh.get(x.id) ?? x);
+    this.favorites = update(this.favorites); save("favorites", this.favorites);
+    this.recentItems = update(this.recentItems); save("recentItems", this.recentItems);
+  }
+
+  homeRows() {
+    const typed = this.homeInput.value().trim();
+    const q = typed.toLowerCase();
+    const match = (p) => !q || p.name.toLowerCase().includes(q);
+    const views = this.homeTab === "views";
+    const kind = views ? "view" : "project";
+    const favIds = new Set(this.favorites.map((x) => x.id));
+    const favs = this.favorites.filter((x) => x.kind === kind && match(x));
+    const recents = this.recentItems.filter((x) => x.kind === kind && !favIds.has(x.id) && match(x));
+    const shown = new Set([...favs, ...recents].map((x) => x.id));
+    const all = views ? this.views.filter((v) => !shown.has(v.id) && match(v))
+      : this.projects.nodes.filter((p) => !shown.has(p.id) && (this.projects.query === typed || match(p)));
+    const tr = T();
+    const section = (text, list) => (list.length ? [{ kind: "head", text }, ...list.map((x) => ({ kind: "item", item: x, fav: favIds.has(x.id) }))] : []);
+    return [...(q ? [] : [{ kind: "tickets" }]), ...section(tr.favorites, favs), ...section(tr.recentItems, recents),
+      ...section(views ? tr.allViews : tr.allProjects, all)];
+  }
+
+  setHomeTab(tab, cx) {
+    this.homeTab = tab; save("homeTab", tab); this.homeSel = 0;
+    this.homeScroll.scroll_to_item(0);
+    if (tab === "views") this.loadViews(cx); else this.loadProjects(cx);
+    cx.notify();
+  }
+
+  homePickable() { return this.homeRows().filter((r) => r.kind !== "head"); }
+
+  homeSelected() {
+    const p = this.homePickable();
+    return p[Math.min(this.homeSel, p.length - 1)] ?? null;
+  }
+
+  moveHome(d, cx) {
+    const pick = this.homePickable();
+    if (!pick.length) return;
+    this.homeSel = Math.max(0, Math.min(pick.length - 1, this.homeSel + d));
+    const on = pick[this.homeSel];
+    this.homeScroll.scroll_to_item(this.homeRows().findIndex((r) => r.kind === on.kind && r.item?.id === on.item?.id));
+    if (this.homeTab === "projects" && this.homeSel >= pick.length - MORE_AHEAD) this.loadProjects(cx, true);
+    cx.notify();
+  }
+
+  activateHome(r, cx) {
+    if (r?.kind === "tickets") this.goList(null, cx);
+    else if (r?.kind === "item") this.openItem(r.item, cx);
+  }
+
+  openItem(p, cx) {
+    this.recentItems = [p, ...this.recentItems.filter((x) => x.id !== p.id)].slice(0, RECENT_PROJECTS);
+    save("recentItems", this.recentItems);
+    const tab = `${VIEW_TAB}${p.id}`;
+    if (p.kind === "project" && !LAYOUTS.includes(this.layouts[tab])) { this.layouts[tab] = "board"; save("layouts", this.layouts); }
+    this.goList(tab, cx);
+  }
+
+  toggleFav(p, cx) {
+    const on = this.favorites.some((x) => x.id === p.id);
+    this.favorites = on ? this.favorites.filter((x) => x.id !== p.id) : [...this.favorites, p];
+    save("favorites", this.favorites);
+    const at = this.homePickable().findIndex((r) => r.item?.id === p.id);
+    if (at >= 0) { this.homeSel = at; this.homeScroll.scroll_to_item(this.homeRows().findIndex((r) => r.item?.id === p.id)); }
+    this.say(on ? T().favRemoved(p.name) : T().favAdded(p.name), cx, on ? "info" : "success");
+    cx.notify();
+  }
+
+  homeKey(k, cx) {
+    const r = this.homeSelected();
+    const fav = () => r?.kind === "item" && this.toggleFav(r.item, cx);
+    const m = {
+      down: () => this.moveHome(1, cx), up: () => this.moveHome(-1, cx),
+      "ctrl-n": () => this.moveHome(1, cx), "ctrl-p": () => this.moveHome(-1, cx),
+      pagedown: () => this.moveHome(10, cx), pageup: () => this.moveHome(-10, cx),
+      enter: () => this.activateHome(r, cx),
+      tab: () => this.setHomeTab(this.homeTab === "views" ? "projects" : "views", cx),
+      "shift-tab": () => this.setHomeTab(this.homeTab === "views" ? "projects" : "views", cx),
+      "cmd-d": fav, "ctrl-d": fav,
+      escape: () => {
+        if (!this.homeInput.value()) { this.dismiss(); return; }
+        this.homeInput.set_value(""); this.onHomeQuery("", cx);
+      },
+    };
+    if (!m[k]) return false;
+    m[k]();
+    return true;
   }
 
   projectTab() {
@@ -792,51 +1314,12 @@ export default class Linear extends View {
 
   viewOf(tab) {
     const id = viewIdOf(tab);
-    return id ? this.views.find((v) => v.id === id) ?? null : null;
-  }
-
-  addView(slug, cx, kind = "view") {
-    if (this.loading.has("addView")) return;
-    cx.spawn(async (cx) => {
-      const v = await this.call(cx, "addView", () => (kind === "project" ? api.project(slug) : api.customView(slug)));
-      if (v === null || (v && v.modelName && v.modelName !== "Issue")) { this.say(kind === "project" ? T().projectNotFound : T().viewNotFound, cx, "error"); return; }
-      if (!v) return;
-      const saved = await VIEWS.read([]);
-      this.views = saved.some((x) => x.id === v.id) ? saved : [...saved, v];
-      try { await VIEWS.write(this.views); } catch (e) { this.say(`${T().viewNotSaved}: ${e?.message ?? e}`, cx, "error"); return; }
-      this.popInput.set_value("");
-      this.openPop(null, cx);
-      if (kind === "project" && !this.layouts[`${VIEW_TAB}${v.id}`]) { this.layouts[`${VIEW_TAB}${v.id}`] = "board"; save("layouts", this.layouts); }
-      this.setTab(`${VIEW_TAB}${v.id}`, cx);
-      this.say(kind === "project" ? T().projectAdded(v.name) : T().viewAdded(v.name), cx, "success");
-    });
-  }
-
-  removeView(id, cx) {
-    const v = this.views.find((x) => x.id === id);
-    cx.spawn(async (cx) => {
-      this.views = (await VIEWS.read([])).filter((x) => x.id !== id);
-      try { await VIEWS.write(this.views); } catch (e) { this.say(`${T().viewNotSaved}: ${e?.message ?? e}`, cx, "error"); return; }
-      const { [id]: _gone, ...rest } = this.viewData;
-      this.viewData = rest;
-      if (viewIdOf(this.tab) === id) this.setTab("all", cx);
-      if (v) this.say(T().viewRemoved(v.name), cx);
-      cx.notify();
-    });
+    if (!id) return null;
+    return [...this.favorites, ...this.recentItems, ...this.views].find((x) => x.id === id) ?? null;
   }
 
   tabLabel(tab) {
-    return isViewTab(tab) ? this.viewOf(tab)?.name ?? T().views : T().tabs[tab ?? "all"];
-  }
-
-  async moreAll(cx) {
-    if (!this.allMore || this.loading.has("all")) return;
-    const page = await this.call(cx, "all", () => api.teamIssues(this.teamIds(), this.allCursor));
-    if (!page) return;
-    const have = new Set(this.all.map((i) => i.id));
-    this.all.push(...page.nodes.filter((i) => !have.has(i.id)));
-    this.allCursor = page.pageInfo.endCursor; this.allMore = page.pageInfo.hasNextPage;
-    this.remember(page.nodes);
+    return isViewTab(tab) ? this.viewOf(tab)?.name ?? T().views : T().tabs.mine;
   }
 
   async loadDetail(cx, id, force = false) {
@@ -852,6 +1335,13 @@ export default class Linear extends View {
     const keep = new Set([...this.recent.slice(0, 20), ...this.mine.slice(0, 10).map((i) => i.identifier), id]);
     save("details", Object.fromEntries(Object.entries(this.details).filter(([k]) => keep.has(k)).slice(-30)));
     this.prefetchImages(cx, d);
+    // An issue only carries its cycle's id: the team's cycles give the name.
+    const team = d.issue.team?.id;
+    if (d.issue.cycle?.id && team && !this.teamCycles[team]) {
+      this.teamCycles[team] = [];
+      const list = await this.call(cx, "cycles", () => api.teamCycles(team));
+      if (list) { this.teamCycles[team] = list; cx.notify(); } else delete this.teamCycles[team];
+    }
   }
 
   // Details (comments, relations) of the top rows, one at a time, so moving through the list is instant.
@@ -877,9 +1367,10 @@ export default class Linear extends View {
     const rank = { blocked: 4, working: 3, done: 2, idle: 1 };
     const all = panes(), out = {};
     const agentIn = (tabId) => all.find((p) => p.tab === tabId && p.program?.agent)?.program ?? null;
+    const branchIn = (tabId) => all.find((p) => p.tab === tabId && p.program?.agent && p.branch)?.branch ?? all.find((p) => p.tab === tabId && p.branch)?.branch ?? null;
     const add = (id, tab, space) => {
       const r = rank[tab.status] ?? 0;
-      if (!out[id] || r > out[id].r) out[id] = { tab, space, r, program: agentIn(tab.id) };
+      if (!out[id] || r > out[id].r) out[id] = { tab, space, r, program: agentIn(tab.id), branch: branchIn(tab.id) ?? space.branch ?? null };
     };
     const list = spaces();
     for (const space of list) for (const tab of space.tabs) {
@@ -913,26 +1404,6 @@ export default class Linear extends View {
     run("space.select", { id: link.space.id });
     run("tab.select", { id: link.tab.id });
   }
-
-  onQuery(text, cx) {
-    this.query = text; this.sel = 0;
-    const mine = ++this.queryGen;
-    cx.timer.after(300, (cx) => { if (mine === this.queryGen) this.searchServer(cx, text); });
-    cx.notify();
-  }
-
-  async searchServer(cx, text) {
-    const q = Q.parse(text);
-    if (Q.isEmpty(q)) { this.server = []; return; }
-    const found = await this.call(cx, "search", () => api.searchIssues(Q.searchCalls(q)));
-    const r = found?.filter((i) => Q.localScore(i, q, this.viewer?.id) >= 0);
-    if (r && this.query === text) { this.server = r; this.serverFor = text; this.remember(r); }
-  }
-
-
-
-
-  // ── List ──────────────────────────────────────────────
 
   // The focused terminal's screen and recent history ("" when there's none or it can't be read).
   async readTerminal() {
@@ -968,6 +1439,11 @@ export default class Linear extends View {
     return { branch: pane?.branch ?? null, cwd: pane?.cwd ?? f?.cwd ?? null, watched, tab: tab?.name ?? null };
   }
 
+  guessBranchIssue() {
+    const m = [...String(this.origin?.branch ?? "").matchAll(IDENT_IN_TEXT)][0];
+    return m ? `${m[1].toUpperCase()}-${m[2]}` : null;
+  }
+
   branchIssue() {
     const place = this.origin?.branch || this.origin?.cwd ? this.origin : this.focusedPlace();
     const keys = new Set(this.teamKeys());
@@ -983,7 +1459,8 @@ export default class Linear extends View {
   openCurrent(cx) {
     this.openedCurrent = true;
     const id = this.branchIssue();
-    if (id) { this.openDetail(id, cx, true); return; }
+    if (id) { if (this.stack.length !== 1 || this.stack[0] !== id) this.openDetail(id, cx, true); return; }
+    if (this.mode === "detail") { this.mode = "list"; this.stack = []; }
     const place = this.origin ?? this.focusedPlace();
     this.say(T().noBranchIssue(place.branch ?? place.cwd ?? "?"), cx);
   }
@@ -991,8 +1468,8 @@ export default class Linear extends View {
   // Everything rows() reads. A render asks for the rows several times (selection, preview, list),
   // and a search scores every cached issue, so it's computed once per change.
   rowsKey() {
-    return [this.query, this.tab, this.mine, this.all, this.all.length, this.server, this.serverFor,
-      this.found, this.recent, this.allMore, this.dataVer, this.foldVer, this.branchIssue(), this.sort.by, this.sort.asc, this.hideClosed, this.nest, this.viewData, this.layout];
+    return [this.tab, this.mine, this.peopleBy, this.findInput.value(),
+      this.found, this.recent, this.dataVer, this.foldVer, this.branchIssue(), this.sort.by, this.sort.asc, this.hideClosed, this.nest, this.viewData, this.layout];
   }
 
   rows() {
@@ -1061,9 +1538,8 @@ export default class Linear extends View {
       .map(([i]) => i);
   }
 
-  // Display "completed issues: hide" leaves closed ones out, unless the search asks for a state.
-  visible(list, q) {
-    if (!this.hideClosed || q.conds.some((c) => c.field === "state")) return list;
+  visible(list) {
+    if (!this.hideClosed) return list;
     return list.filter((i) => !CLOSED.has(i.state?.type));
   }
 
@@ -1072,7 +1548,6 @@ export default class Linear extends View {
     this.sort = by === this.sort.by && by !== "default" ? { by, asc: !this.sort.asc } : { by, asc: false };
     save("sort", this.sort);
     this.sel = 0;
-    this.schedulePreview(cx);
     cx.notify();
   }
 
@@ -1087,44 +1562,37 @@ export default class Linear extends View {
 
   buildRows() {
     const out = [];
-    const q = Q.parse(this.query);
-    if (Q.isEmpty(q)) {
-      const viewId = viewIdOf(this.tab);
-      let list = viewId ? this.viewData[viewId]?.nodes ?? []
-        : this.tab === "mine" ? this.mine : this.tab === "all" ? this.all : this.recent.map((id) => this.cache[id]).filter(Boolean);
-      const found = this.found.map((id) => this.cache[id] ?? this.details[id]?.issue).filter(Boolean);
-      if (found.length) {
-        const ids = new Set(found.map((i) => i.identifier));
-        out.push({ kind: "head", text: T().foundHead(found.length) }, ...found.map((issue) => ({ kind: "issue", issue, found: true })));
-        out.push({ kind: "head", text: this.tabLabel(this.tab) });
-        list = list.filter((i) => !ids.has(i.identifier));
-      }
-      if (this.tab === "mine") {
-        const b = this.branchIssue();
-        const issue = b && !this.found.includes(b) && (this.cache[b] ?? this.details[b]?.issue);
-        if (issue) { out.push({ kind: "issue", issue, pin: true }); list = list.filter((i) => i.identifier !== b); }
-      }
-      out.push(...this.nested(this.sorted(this.visible(list, q))));
-      if (this.tab === "all" && this.allMore) out.push({ kind: "more" });
-      if (viewId && this.viewData[viewId]?.more) out.push({ kind: "more" });
-      return out;
+    const viewId = viewIdOf(this.tab);
+    let list = viewId ? this.byTitle(this.byPeople(this.viewData[viewId]?.nodes ?? [])) : this.mine;
+    const found = this.found.map((id) => this.cache[id] ?? this.details[id]?.issue).filter(Boolean);
+    if (found.length) {
+      const ids = new Set(found.map((i) => i.identifier));
+      out.push({ kind: "head", text: T().foundHead(found.length) }, ...found.map((issue) => ({ kind: "issue", issue, found: true })));
+      out.push({ kind: "head", text: this.tabLabel(this.tab) });
+      list = list.filter((i) => !ids.has(i.identifier));
     }
-    const seen = new Map();
-    // A cached issue shows only when it matches; a server result (bonus 0) shows anyway, since the
-    // server saw the whole description and the current state.
-    const consider = (i, bonus = -1) => {
-      if (!i?.identifier || i.archivedAt || i.trashed) return;
-      const s = Math.max(Q.localScore(i, q, this.viewer?.id), bonus);
-      if (s < 0) return;
-      const prev = seen.get(i.identifier);
-      if (!prev || prev.s < s) seen.set(i.identifier, { i, s });
-    };
-    for (const i of Object.values(this.cache)) consider(i);
-    // Server results count only for the search they answered (until the new one comes back).
-    if (this.serverFor === this.query) for (const i of this.server) consider(i, 0);
-    const ranked = [...seen.values()].sort((a, b) => b.s - a.s || (b.i.updatedAt ?? "").localeCompare(a.i.updatedAt ?? ""));
-    out.push(...this.nested(this.sorted(this.visible(ranked.map(({ i }) => i), q))));
+    if (this.tab === "mine") {
+      const b = this.branchIssue();
+      const issue = b && !this.found.includes(b) && (this.cache[b] ?? this.details[b]?.issue);
+      if (issue) { out.push({ kind: "issue", issue, pin: true }); list = list.filter((i) => i.identifier !== b); }
+    }
+    out.push(...this.nested(this.sorted(this.visible(list))));
     return out;
+  }
+
+  hasMore() {
+    const viewId = viewIdOf(this.tab);
+    return Boolean(viewId && this.viewData[viewId]?.more);
+  }
+
+  loadMore(cx) {
+    const viewId = viewIdOf(this.tab);
+    if (viewId) this.loadView(cx, viewId, true);
+  }
+
+  nearEnd(at, n, cx) {
+    if (at < n - MORE_AHEAD || !this.hasMore()) return;
+    cx.timer.after(0, (cx) => this.loadMore(cx));
   }
 
   pickable() { this.rows(); return this.pickMemo; }
@@ -1139,7 +1607,8 @@ export default class Linear extends View {
     const n = this.pickable().length;
     if (!n) return;
     this.sel = Math.max(0, Math.min(n - 1, this.sel + d));
-    this.schedulePreview(cx);
+    this.listScroll.scroll_to_item(this.rows().indexOf(this.selected()));
+    this.nearEnd(this.sel, n, cx);
     cx.notify();
   }
 
@@ -1148,7 +1617,6 @@ export default class Linear extends View {
     const n = this.pickable().findIndex((r) => r.kind === "issue" && r.issue.identifier === id);
     if (n < 0) return false;
     this.sel = n;
-    this.schedulePreview(cx);
     return true;
   }
 
@@ -1180,7 +1648,7 @@ export default class Linear extends View {
   setLayout(layout, cx) {
     this.layout = layout; save("layout", layout);
     this.layouts[this.tab] = layout; save("layouts", this.layouts);
-    if (layout === "split") this.schedulePreview(cx);
+    this.fillBoard(cx);
     cx.notify();
   }
 
@@ -1211,17 +1679,15 @@ export default class Linear extends View {
       if (p && p !== id && here.has(p)) { if (!kids.has(p)) kids.set(p, []); kids.get(p).push(x); }
       else roots.push(x);
     }
-    const walk = (x, guides) => {
+    const walk = (x) => {
       const id = x.r.issue.identifier;
       if (seen.has(id)) return;
       seen.add(id);
-      out.push({ ...x, guides });
-      const ch = (kids.get(id) ?? []).filter((c) => !seen.has(c.r.issue.identifier));
-      const up = guides.map((g) => (g === "mid" || g === "line" ? "line" : "none"));
-      ch.forEach((c, n) => walk(c, [...up, n === ch.length - 1 ? "end" : "mid"]));
+      out.push(x);
+      for (const c of kids.get(id) ?? []) walk(c);
     };
-    roots.forEach((x) => walk(x, []));
-    for (const x of cards) if (!seen.has(x.r.issue.identifier)) out.push({ ...x, guides: [] });
+    roots.forEach(walk);
+    for (const x of cards) if (!seen.has(x.r.issue.identifier)) out.push(x);
     return out;
   }
 
@@ -1235,141 +1701,15 @@ export default class Linear extends View {
     cx.notify();
   }
 
-  // ── Saved filters ─────────────────────────────────────
-  // A saved filter is a search (words and tokens). ⌃S saves the current one (or removes it if saved),
-  // a pill or ⌃1–9 runs one, running the active one again clears the search.
-
-  // A preset is a search and, when it was saved with one, a display (order, closed issues hidden):
-  // { query, sort?, hideClosed? }. It's the active one when the window shows exactly that.
-  displayIsDefault() { return this.sort.by === "default" && !this.sort.asc && !this.hideClosed; }
-
-  presetMatches(f) {
-    if (f.query !== this.query.trim()) return false;
-    if (!f.query && f.tab && f.tab !== this.tab) return false;
-    if (!f.sort) return f.query !== "" || this.displayIsDefault();
-    return f.sort.by === this.sort.by && Boolean(f.sort.asc) === this.sort.asc && Boolean(f.hideClosed) === this.hideClosed;
-  }
-
-  savedIndex() {
-    // A preset with a display beats one with the same search alone.
-    const n = this.filters.findIndex((f) => f.sort && this.presetMatches(f));
-    return n >= 0 ? n : this.filters.findIndex((f) => !f.sort && this.presetMatches(f));
-  }
-
-  canSave() { return Boolean(this.query.trim()) || !this.displayIsDefault(); }
-
-  presetLabel(f) {
-    const tr = T();
-    if (f.name) return f.name;
-    const parts = [f.query || this.tabLabel(f.tab)];
-    if (f.sort && f.sort.by !== "default") parts.push(`${f.sort.asc ? "↑" : "↓"} ${tr.sort[f.sort.by]}`);
-    else if (f.sort?.asc) parts.push("↑");
-    if (f.hideClosed) parts.push(tr.closedHidden);
-    return parts.join(" · ");
-  }
-
-  // ⌃S (or the + pill, or the filter menu): saves what's shown as a preset, or removes the active one.
-  // The display goes in only when it isn't the default, so a search-only preset leaves the order alone.
-  toggleSaveFilter(cx) {
-    const n = this.savedIndex();
-    if (n >= 0) { this.askDelete(n, cx); return; }
-    else if (!this.canSave()) { this.say(T().filterEmpty, cx); return; }
-    else {
-      const f = { query: this.query.trim() };
-      if (!f.query) f.tab = this.tab; // a display alone applies to a view
-      if (!this.displayIsDefault()) { f.sort = { ...this.sort }; f.hideClosed = this.hideClosed; }
-      this.filters = [...this.filters, f];
-      this.say(T().filterSaved(this.presetLabel(f)), cx, "success");
-    }
-    save("filters", this.filters);
-    cx.notify();
-  }
-
-  // Deleting takes a second press within 3 s: the first turns × into "Delete?".
-  askDelete(n, cx) {
-    if (this.confirmDel === n) { this.confirmDel = null; this.removeFilter(n, cx); cx.notify(); return; }
-    this.confirmDel = n;
-    this.say(T().confirmDelete(this.presetLabel(this.filters[n])), cx);
-    cx.timer.after(3000, (cx) => { if (this.confirmDel === n) { this.confirmDel = null; cx.notify(); } });
-    cx.notify();
-  }
-
-  // Rename: ✎ on the active preset turns its pill into a field. Enter or leaving it keeps the name
-  // (empty goes back to the search as the name), Esc cancels.
-  startRename(n, cx) {
-    const f = this.filters[n];
-    if (!f) return;
-    this.renaming = n; this.confirmDel = null;
-    this.renameInput.set_value(f.name ?? "");
-    cx.timer.after(0, () => this.renameInput.focus());
-    cx.notify();
-  }
-
-  finishRename(cx, keep) {
-    const n = this.renaming;
-    if (n === null) return;
-    this.renaming = null;
-    const f = this.filters[n];
-    if (keep && f) {
-      const name = this.renameInput.value().trim();
-      this.filters = this.filters.map((x, k) => (k === n ? (name && name !== x.query ? { ...x, name } : (({ name: _n, ...rest }) => rest)(x)) : x));
-      save("filters", this.filters);
-      this.say(T().presetRenamed(this.presetLabel(this.filters[n])), cx, "success");
-    }
-    if (this.mode === "list") this.focusList();
-    cx.notify();
-  }
-
-  removeFilter(n, cx) {
-    const f = this.filters[n];
-    if (!f) return;
-    this.filters = this.filters.filter((_f, k) => k !== n);
-    save("filters", this.filters);
-    this.say(T().filterRemoved(this.presetLabel(f)), cx);
-  }
-
-  // Runs a preset (its display too; what was shown before comes back when it's turned off). Running the
-  // active one again clears it.
-  applyFilter(n, cx) {
-    const f = this.filters[n];
-    if (!f) return;
-    const off = this.savedIndex() === n;
-    if (this.mode === "detail") { this.stack = []; this.mode = "list"; }
-    if (off) {
-      if (this.displayBefore) { this.sort = this.displayBefore.sort; this.hideClosed = this.displayBefore.hideClosed; this.displayBefore = null; }
-    } else if (f.sort) {
-      this.displayBefore ??= { sort: { ...this.sort }, hideClosed: this.hideClosed };
-      this.sort = { ...f.sort }; this.hideClosed = Boolean(f.hideClosed);
-    } else if (this.displayBefore) {
-      this.sort = this.displayBefore.sort; this.hideClosed = this.displayBefore.hideClosed; this.displayBefore = null;
-    }
-    save("sort", this.sort); save("hideClosed", this.hideClosed);
-    const q = off ? "" : f.query;
-    if (!off && !f.query && f.tab) { this.tab = f.tab; save("tab", f.tab); }
-    this.sel = 0;
-    this.input.set_value(q);
-    this.onQuery(q, cx);
-    this.focusList();
-    cx.notify();
-  }
-
-  schedulePreview(cx) {
-    if (this.width < WIDE || this.layout !== "split") return;
-    const id = this.shownId();
-    if (!id) return;
-    const gen = ++this.previewGen;
-    cx.timer.after(220, (cx) => { if (gen === this.previewGen) this.loadDetail(cx, id); });
-  }
-
   activate(r, cx) {
     if (!r) return;
     if (r.kind === "issue") this.openDetail(r.issue.identifier, cx, true);
-    else if (r.kind === "more") { const v = viewIdOf(this.tab); if (v) this.loadView(cx, v, true); else this.moreAll(cx); }
   }
 
   openDetail(id, cx, reset) {
     this.stack = reset ? [id] : [...this.stack, id];
     this.mode = "detail";
+    this.actionsOpen = false;
     this.recent = [id, ...this.recent.filter((x) => x !== id)].slice(0, RECENT_MAX);
     save("recent", this.recent);
     this.loadDetail(cx, id);
@@ -1379,6 +1719,7 @@ export default class Linear extends View {
 
   back(cx) {
     this.stack.pop();
+    this.actionsOpen = false;
     if (!this.stack.length && props()?.side) { this.dismiss(); return; }
     if (!this.stack.length) { this.mode = "list"; this.focusList(); }
     else this.loadDetail(cx, this.stack[this.stack.length - 1]);
@@ -1386,17 +1727,16 @@ export default class Linear extends View {
   }
 
   setTab(tab, cx) {
+    if (tab !== this.tab) this.findInput.set_value("");
     this.tab = tab; save("tab", tab); this.sel = 0;
     if (LAYOUTS.includes(this.layouts?.[tab])) this.layout = this.layouts[tab];
     const viewId = viewIdOf(tab);
     if (viewId) cx.spawn(async (cx) => this.loadView(cx, viewId));
-    if (this.query) { this.query = ""; this.input.set_value(""); }
-    this.schedulePreview(cx);
     cx.notify();
   }
 
   focusList() { this.typing = false; this.handle.focus(); }
-  focusSearch() { this.typing = true; this.input.focus(); }
+  focusHome() { this.typing = true; this.homeInput.focus(); }
 
   reload(cx) {
     const id = this.mode === "detail" ? this.shownId() : null;
@@ -1410,7 +1750,7 @@ export default class Linear extends View {
 
   keepFocus() {
     if (this.handle.is_focused()) this.typing = false;
-    if (props()?.overlay || this.typing || this.pop || this.renaming !== null) return;
+    if (props()?.overlay || this.typing || this.pop || this.mode === "home") return;
     const f = focused();
     const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
     const was = this.lastPane;
@@ -1504,6 +1844,7 @@ export default class Linear extends View {
   // ── Actions ───────────────────────────────────────────
 
   say(text, cx, level = "info") {
+    if (level === "error") this.logError("say", text);
     this.flash = { text, level };
     const gen = ++this.flashGen;
     cx.timer.after(1800, (cx) => { if (gen === this.flashGen) { this.flash = null; cx.notify(); } });
@@ -1512,12 +1853,10 @@ export default class Linear extends View {
 
   // ── Outline ───────────────────────────────────────────
   // The detail scrolls by our own offset (a plain scroll area can't be moved from code): the wheel moves
-  // it, each item reports its height, so we know where every heading and thread is. The outline marks
-  // the one at the top of the view and the ones on screen, follows as the page scrolls, and a click
-  // scrolls the page to that item.
+  // it, each item reports its height, so we know where every heading and thread is.
 
   scrollOf(id) {
-    if (!this.sc[id]) this.sc[id] = { y: 0, view: 0, content: 0, h: {}, tops: {}, keys: ["top"], active: "top", ol: 0, olView: 0, olFollow: null };
+    if (!this.sc[id]) this.sc[id] = { y: 0, view: 0, content: 0, h: {}, tops: {}, keys: ["top"], active: "top" };
     return this.sc[id];
   }
 
@@ -1537,7 +1876,6 @@ export default class Linear extends View {
     const S = this.scrollOf(id);
     if (key === "end") S.y = Infinity; // clamped once the height is known
     else S.y = key === "top" ? 0 : Math.max(0, (S.tops[key] ?? 0) - 8);
-    S.olFollow = null;
     cx.notify();
   }
 
@@ -1573,7 +1911,7 @@ export default class Linear extends View {
     if (Object.keys(details).length !== Object.keys(this.details).length) { this.details = details; save("details", details); }
     const cache = Object.fromEntries(Object.entries(this.cache).filter(([k, i]) => keep.has(k) || Date.parse(i?.updatedAt ?? "") >= cut));
     if (Object.keys(cache).length !== Object.keys(this.cache).length) { this.cache = cache; save("cache", cache); }
-    exec("sh", ["-c", 'find "$1" -maxdepth 1 -type f ! -name data.json ! -name views.json -mtime +"$2" -delete', "sh", `${appHome()}/${BASE}/.cache`, String(days)]).catch(() => {});
+    exec("sh", ["-c", 'find "$1" -maxdepth 1 -type f ! -name data.json ! -name views.json ! -name prompts.json -mtime +"$2" -delete', "sh", `${appHome()}/${BASE}/.cache`, String(days)]).catch(() => {});
   }
 
   copy(text, what, cx) {
@@ -1634,10 +1972,18 @@ export default class Linear extends View {
     if (this.handle.is_focused()) this.typing = false;
     const id = this.shownId();
     const issue = id ? (this.details[id]?.issue ?? this.cache[id]) : null;
+    if (k === "ctrl-/" || (this.shortcuts && k === "escape")) { this.shortcuts = !this.shortcuts; cx.notify(); cx.stop_propagation(); return; }
+    if (this.creating) { if (this.createKey(k, cx)) cx.stop_propagation(); return; }
+    if (this.starting) { if (this.startKey(k, cx)) cx.stop_propagation(); return; }
+    if (this.actionsOpen && this.mode === "detail" && k === "escape") { this.actionsOpen = false; cx.notify(); cx.stop_propagation(); return; }
+    if (this.finding && this.mode === "list") {
+      if (k === "escape") { if (this.findInput.value()) { this.findInput.set_value(""); this.sel = 0; cx.notify(); } else this.focusList(); cx.stop_propagation(); }
+      else if (k === "down" || k === "up") { this.move(k === "down" ? 1 : -1, cx); cx.stop_propagation(); }
+      return;
+    }
     if (this.editFocus) {
       if (k === "cmd-enter" || k === "ctrl-enter") { this.saveIssue(cx); cx.stop_propagation(); }
-      else if (k === "escape") { this.focusList(); this.editFocus = null; cx.notify(); cx.stop_propagation(); }
-      else if (k === "tab" && this.editFocus === "title") { this.bodyDraft.focus(); cx.stop_propagation(); }
+      else if (k === "escape") { this.focusList(); cx.stop_propagation(); }
       return;
     }
     if (this.composing) {
@@ -1651,27 +1997,23 @@ export default class Linear extends View {
       if (this.assignKey(k, cx)) cx.stop_propagation();
       return;
     }
-    if (this.statePick && this.stateKey(k, cx)) { cx.stop_propagation(); return; }
-    if (this.renaming !== null) {
-      if (k === "escape") { this.finishRename(cx, false); cx.stop_propagation(); }
+    if (this.propPick) {
+      if (this.propKey(k, cx)) cx.stop_propagation();
       return;
     }
+    if (this.statePick && this.stateKey(k, cx)) { cx.stop_propagation(); return; }
     if (this.pop) {
-      if (k === "ctrl-s") { this.toggleSaveFilter(cx); cx.stop_propagation(); return; }
-      if (k === "escape") {
-        if (this.popField) { this.popField = null; this.popInput.set_value(""); cx.notify(); } else this.openPop(null, cx);
-        cx.stop_propagation();
-      }
+      if (k === "escape") { this.openPop(null, cx); cx.stop_propagation(); }
       return;
     }
     if (this.lightbox) { this.lightboxKey(k, cx); cx.stop_propagation(); return; }
     if (this.pick) { if (this.pickKey(k, cx)) cx.stop_propagation(); return; }
+    if (this.mode === "home") { if (this.homeKey(k, cx)) cx.stop_propagation(); return; }
     if (this.mode === "detail") {
       if (k === "escape" && this.issueEdit) { this.issueEdited() ? this.say(T().editPending, cx) : this.cancelEdit(cx); cx.stop_propagation(); return; }
       const m = {
         escape: () => this.back(cx), backspace: () => this.back(cx), q: () => this.dismiss(),
         o: () => issue && this.openUrl(issue.url, cx), y: () => issue && this.copy(issue.url, "URL", cx),
-        "shift-y": () => { const pr = api.mainPr(issue); pr ? this.copy(pr.url, T().prLink, cx) : this.say(T().noPr, cx); },
         i: () => issue && this.copy(issue.identifier, "ID", cx), c: () => issue && this.work(issue, cx), k: () => issue && this.askClaude(issue, cx),
         r: () => this.reload(cx),
         g: () => { const l = id && this.tabLinks()[id]; l ? this.goTab(l) : this.say(T().noTab, cx); },
@@ -1687,42 +2029,35 @@ export default class Linear extends View {
         a: () => this.assignMe(issue, cx),
         "shift-a": () => id && this.openAssign(id, cx),
         s: () => id && this.openStates(id, cx),
+        p: () => id && this.openProp(id, "priority", cx), l: () => id && this.openProp(id, "labels", cx),
+        "shift-p": () => id && this.openProp(id, "project", cx), "shift-c": () => id && this.openProp(id, "cycle", cx),
+        "shift-d": () => id && this.openProp(id, "due", cx),
         e: () => id && this.editIssue(id, cx),
+        n: () => this.openCreate(cx),
       };
       if (!m[k]) return;
       m[k](); cx.stop_propagation(); return;
     }
-    const step = (d) => this.setTab(TAB_IDS[(TAB_IDS.indexOf(this.tab) + d + TAB_IDS.length) % TAB_IDS.length], cx);
     const m = {
       down: () => this.move(1, cx), up: () => this.move(-1, cx),
       "ctrl-n": () => this.move(1, cx), "ctrl-p": () => this.move(-1, cx),
+      "/": () => viewIdOf(this.tab) && this.findInput.focus(),
       pagedown: () => this.move(10, cx), pageup: () => this.move(-10, cx),
-      tab: () => step(1), "shift-tab": () => step(-1),
       "ctrl-o": () => issue && this.openUrl(issue.url, cx),
       "ctrl-y": () => issue && this.copy(issue.url, "URL", cx),
       "ctrl-r": () => this.reload(cx),
       "ctrl-l": () => this.setLayout(this.nextLayout(), cx),
       "shift-o": () => this.projectTab() && this.setProjectPane(this.overviewShown() ? "issues" : "overview", cx),
-      "ctrl-s": () => this.toggleSaveFilter(cx),
-      escape: () => {
-        const had = Boolean(this.query);
-        if (had) { this.input.set_value(""); this.onQuery("", cx); }
-        if (this.typing) this.focusList();
-        else if (!had) this.dismiss();
-      },
-      enter: () => (this.typing ? this.focusList() : this.activate(this.selected(), cx)),
-      "cmd-f": () => this.focusSearch(), "ctrl-f": () => this.focusSearch(),
+      escape: () => (props()?.side ? this.dismiss() : this.goHome(cx)),
+      backspace: () => !props()?.side && this.goHome(cx),
+      enter: () => this.activate(this.selected(), cx),
+      r: () => this.reload(cx), n: () => this.openCreate(cx),
+      left: () => this.foldKey(-1, cx), right: () => this.foldKey(1, cx),
     };
-    if (!this.typing) {
-      Object.assign(m, { "/": () => this.focusSearch(), r: () => this.reload(cx),
-        left: () => this.foldKey(-1, cx), right: () => this.foldKey(1, cx) });
-    }
     if (this.layout === "board") {
-      Object.assign(m, { down: () => this.boardMove(0, 1, cx), up: () => this.boardMove(0, -1, cx), "ctrl-n": () => this.boardMove(0, 1, cx), "ctrl-p": () => this.boardMove(0, -1, cx) });
-      if (!this.typing) Object.assign(m, { left: () => this.boardMove(-1, 0, cx), right: () => this.boardMove(1, 0, cx) });
+      Object.assign(m, { down: () => this.boardMove(0, 1, cx), up: () => this.boardMove(0, -1, cx), "ctrl-n": () => this.boardMove(0, 1, cx), "ctrl-p": () => this.boardMove(0, -1, cx),
+        left: () => this.boardMove(-1, 0, cx), right: () => this.boardMove(1, 0, cx) });
     }
-    const fk = /^ctrl-([1-9])$/.exec(k);
-    if (fk && this.filters[Number(fk[1]) - 1]) m[k] = () => this.applyFilter(Number(fk[1]) - 1, cx);
     if (!m[k]) return;
     m[k](); cx.stop_propagation();
   }
@@ -1739,31 +2074,49 @@ export default class Linear extends View {
       .on_key_down((e, cx) => this.onKey(e, cx))
       .on_mouse_up("left", (_e, cx) => this.release(cx));
     this.links = this.tabLinks();
-    const wide = this.width >= WIDE;
     if (this.pick) return root.child(this.header(t)).child(this.pickView(t)).child(this.footer(t));
+    if (this.mode === "home") return root.child(this.header(t)).child(this.homeView(t)).child(this.footer(t))
+      .when(Boolean(this.creating), (el) => el.child(this.createView(t)))
+      .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsView(t)));
     const body = this.mode === "detail"
-      ? this.detailView(t, this.stack[this.stack.length - 1], true)
+      ? this.detailView(t, this.stack[this.stack.length - 1])
       : this.overviewShown() ? this.overviewView(t, this.projectTab())
       : this.layout === "board" ? this.boardView(t)
-      : wide && this.layout === "split"
-        ? h_resizable("linear-split").flex_1().min_h(0).w_full()
-          .on_resize((sizes, cx) => { if (sizes[0] > 0) { this.listW = Math.round(sizes[0]); save("listW", this.listW); cx.notify(); } })
-          .child(resizable_panel().size(this.listW).size_range(LIST_MIN, Math.max(LIST_MIN, this.width - PREVIEW_MIN))
-            .child(v_flex().size_full().min_h(0).child(this.listView(t))))
-          .child(resizable_panel().size_range(PREVIEW_MIN)
-            .child(v_flex().size_full().min_w(0).min_h(0).child(this.shownId() ? this.detailView(t, this.shownId(), false) : this.empty(t, T().selectHint))))
-        : this.listView(t);
-    return root.child(this.header(t)).when(this.mode === "list", (el) => el.child(this.searchBar(t))).child(body).child(this.footer(t))
+      : this.listView(t);
+    return root.child(this.header(t)).when(this.mode === "list", (el) => el.child(this.listBar(t))).child(body).child(this.footer(t))
       .when(Boolean(this.pop) && this.mode === "list", (el) => el.child(this.popView(t)))
-      .when(Boolean(this.lightbox), (el) => el.child(this.lightboxView(t)));
+      .when(Boolean(this.lightbox), (el) => el.child(this.lightboxView(t)))
+      .when(Boolean(this.creating), (el) => el.child(this.createView(t)))
+      .when(Boolean(this.starting), (el) => el.child(this.startView(t)))
+      .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsView(t)));
+  }
+
+  shortcutRows() {
+    const tr = T();
+    if (this.creating) return tr.keysNew;
+    if (this.starting) return tr.keysStart;
+    if (this.editFocus) return tr.keysEdit;
+    if (this.composing) return tr.keysComment(this.agentName());
+    if (this.mode === "detail") return tr.keysDetail(this.agentName(), this.canWrite);
+    if (this.mode === "home") return tr.keysHome;
+    return this.layout === "board" ? tr.keysBoard : tr.keysList;
+  }
+
+  shortcutsView(t) {
+    return h_flex().id("shortcuts-back").absolute().inset_0().items_center().justify_center().bg("#0000002e")
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.shortcuts = false; cx.notify(); })
+      .child(v_flex().id("shortcuts").w(440).max_h_full().p(14).gap(2).rounded(10).border_1().border_color(t.border).bg(t.popover).overflow_hidden()
+        .on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+        .child(div().pb(8).text_size(13).font_semibold().child(T().shortcuts))
+        .children(this.shortcutRows().map(([key, label], n) => h_flex().id(`shortcut-${n}`).h(26).gap(12).items_center()
+          .child(div().flex_1().text_size(12.5).child(label))
+          .child(div().px(6).py(1).rounded(4).bg(t.selected).text_size(11.5).child(key)))));
   }
 
   header(t) {
     const busy = this.loading.size > 0;
     return h_flex().h(42).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
-      .child(div().text_size(14).font_semibold().child("Linear"))
-      .child(div().text_size(11.5).text_color(t.dim).child(this.viewer?.organization?.name ?? ""))
-      .child(div().min_w(0).truncate().text_size(12.5).text_color(t.muted).child(`·  ${this.tabLabel(this.tab)}`))
+      .child(this.breadcrumb(t))
       .when(Boolean(this.projectTab()) && this.mode === "list", (el) => el.child(h_flex().flex_none().p(2).gap(2).rounded(7).border_1().border_color(t.border)
         .children([["issues", T().projectIssues], ["overview", T().projectOverview]].map(([key, label]) => {
           const on = (this.projectPane[this.tab] ?? "issues") === key;
@@ -1773,12 +2126,59 @@ export default class Linear extends View {
         }))))
       .child(div().flex_1())
       .when(busy, (el) => el.child(svg(`${ICON}/spinner.svg`).size(13).text_color(t.dim).spin(900)))
-      .when(this.width >= WIDE, (el) => el.child(this.layoutSwitch(t)))
+      .when(this.mode === "list", (el) => el.child(this.layoutSwitch(t)))
+      .when(this.canWrite, (el) => el.child(this.iconButton(t, "l-new", "+", (cx) => this.openCreate(cx))))
       .child(this.iconButton(t, "l-refresh", "↻", (cx) => this.reload(cx)))
       .when(Boolean(props()?.overlay) || Boolean(props()?.side), (el) => el.child(this.iconButton(t, "l-close", svg(`${ICON}/close.svg`).size(13), () => this.dismiss())));
   }
 
-  // Split (list + preview) or the list alone. ⌃L flips it.
+  breadcrumb(t) {
+    const fav = this.mode !== "home" ? this.viewOf(this.tab) : null;
+    const crumbs = [{ key: "home", label: "Linear", go: props()?.side ? null : (cx) => this.goHome(cx) }];
+    if (this.mode !== "home") crumbs.push({ key: "list", label: this.tabLabel(this.tab), go: this.mode === "detail" ? (cx) => this.toList(cx) : null, fav });
+    if (this.mode === "detail") this.stack.forEach((id, n) => {
+      const issue = this.details[id]?.issue ?? this.cache[id];
+      const last = n === this.stack.length - 1;
+      crumbs.push({ key: `i-${n}`, label: last && issue?.title ? `${id}  ${issue.title}` : id, go: last ? null : (cx) => this.toStack(n, cx) });
+    });
+    const sep = () => div().flex_none().text_size(13).text_color(t.dim).child("›");
+    const items = [];
+    crumbs.forEach((c, n) => {
+      const last = n === crumbs.length - 1;
+      if (n) items.push(sep());
+      items.push(h_flex().id(`bc-${c.key}`).min_w(0).when(!last, (el) => el.flex_none()).when(last, (el) => el.flex_shrink_1())
+        .h(26).px(6).items_center().rounded(6)
+        .text_size(n ? 13 : 14).font_semibold().text_color(last ? t.foreground : t.muted)
+        .when(Boolean(c.go), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_mouse_down("left", stop).on_click((_e, cx) => c.go(cx)))
+        .child(div().min_w(0).truncate().child(c.label)));
+      if (c.fav) {
+        const on = this.favorites.some((x) => x.id === c.fav.id);
+        items.push(h_flex().id("bc-fav").flex_none().size(24).items_center().justify_center().rounded(6).cursor_pointer()
+          .text_color(on ? STAR : t.dim).hover((s) => s.bg(t.hover).text_color(STAR))
+          .on_mouse_down("left", stop).on_click((_e, cx) => this.toggleFav(c.fav, cx))
+          .child(svg(`${ICON}/${on ? "star-fill" : "star"}.svg`).size(15)));
+      }
+    });
+    return h_flex().min_w(0).flex_shrink_1().gap(2).items_center().children(items)
+      .child(div().flex_none().pl(6).text_size(11.5).text_color(t.dim).child(this.viewer?.organization?.name ?? ""));
+  }
+
+  toList(cx) {
+    this.stack = [];
+    this.mode = "list";
+    this.actionsOpen = false;
+    this.focusList();
+    cx.notify();
+  }
+
+  toStack(n, cx) {
+    this.stack = this.stack.slice(0, n + 1);
+    this.actionsOpen = false;
+    this.loadDetail(cx, this.stack[n]);
+    cx.notify();
+  }
+
   layoutSwitch(t) {
     const tr = T().layout;
     const seg = (key, label) => {
@@ -1788,7 +2188,7 @@ export default class Linear extends View {
         .on_mouse_down("left", stop).on_click((_e, cx) => this.setLayout(key, cx)).child(label);
     };
     return h_flex().p(2).gap(2).rounded(7).border_1().border_color(t.border)
-      .child(seg("split", tr.split)).child(seg("list", tr.list)).child(seg("board", tr.board));
+      .child(seg("list", tr.list)).child(seg("board", tr.board));
   }
 
   iconButton(t, id, label, action) {
@@ -1797,29 +2197,18 @@ export default class Linear extends View {
       .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
   }
 
-  searchBar(t) {
-    return v_flex().px(12).py(8).gap(8).flex_none().border_b(1).border_color(t.border)
-      .child(h_flex().gap(8).items_center().child(h_flex().id("l-search").h(34).flex_1().px(10).gap(8).items_center().rounded(8).border_1().border_color(t.input).bg(t.background)
-        .on_mouse_down("left", stop)
-        .child(svg(`${ICON}/search.svg`).size(14).text_color(t.dim))
-        .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-        .when(!this.query, (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(T().searchPlaceholder))))
-        .child(this.popButton(t, "filter", `${ICON}/filter.svg`, T().filter, Q.parse(this.query).conds.length > 0))
-        .child(this.popButton(t, "display", `${ICON}/sliders.svg`, T().display, this.sort.by !== "default" || this.sort.asc || this.hideClosed || !this.nest)))
-      .child(this.filterBar(t));
+  listBar(t) {
+    return h_flex().px(12).py(8).gap(8).flex_none().items_center().border_b(1).border_color(t.border)
+      .when(Boolean(viewIdOf(this.tab)), (el) => el.child(this.peopleButton(t)).child(this.findBox(t)))
+      .child(div().flex_1())
+      .child(this.popButton(t, "display", `${ICON}/sliders.svg`, T().display, this.sort.by !== "default" || this.sort.asc || this.hideClosed || !this.nest));
   }
 
-  // ── Filter and display popovers ───────────────────────
-  // Two buttons beside the search, as in Linear. Filter picks values (state, assignee, priority, label,
-  // team) and writes them into the search as tokens, so what it does stays visible and editable.
-  // Display sets the order, whether closed issues show and whether sub-issues nest.
 
   openPop(which, cx) {
     this.pop = which;
-    this.popField = null; this.popNeg = false; this.popMenu = null;
-    if (which === "filter" || which === "views") { this.popInput.set_value(""); cx.timer.after(0, () => this.popInput.focus()); }
-    if (which === "views") cx.spawn(async (cx) => { this.views = await VIEWS.read(this.views); cx.notify(); });
-    else if (!which && this.mode === "list") this.focusList();
+    this.popMenu = null;
+    if (!which && this.mode === "list") this.focusList();
     cx.notify();
   }
 
@@ -1836,37 +2225,6 @@ export default class Linear extends View {
     this.setDisplay("nest", this.config.nestSubIssues !== false, cx);
   }
 
-  setQuery(text, cx) {
-    this.input.set_value(text);
-    this.onQuery(text, cx);
-    cx.notify();
-  }
-
-  // What each field offers, from the loaded issues (and the viewer's teams).
-  filterValues(field) {
-    const issues = [...this.mine, ...this.all, ...Object.values(this.cache)];
-    const uniq = (list, key) => [...new Map(list.filter(Boolean).map((x) => [key(x), x])).values()];
-    if (field === "s") {
-      return uniq(issues.map((i) => i.state), (s) => s.name)
-        .sort((a, b) => (STATE_RANK[a.type] ?? 9) - (STATE_RANK[b.type] ?? 9) || a.name.localeCompare(b.name))
-        .map((s) => ({ val: s.name, label: s.name, icon: stateIcon(s), color: s.color }));
-    }
-    if (field === "@") {
-      const me = this.viewer?.id;
-      const people = uniq(issues.map((i) => i.assignee), (a) => a.id).filter((a) => a.id !== me)
-        .map((a) => a.displayName ?? a.name).sort((a, b) => a.localeCompare(b));
-      return [{ val: "me", label: T().me }, ...people.map((n) => ({ val: n, label: n }))];
-    }
-    if (field === "p") {
-      return [["urgent", 1], ["high", 2], ["medium", 3], ["low", 4], ["none", 0]].map(([val, n]) => ({ val, label: T().priority[n] ?? T().noPriority, prio: n }));
-    }
-    if (field === "l") {
-      return uniq(issues.flatMap((i) => i.labels?.nodes ?? []), (l) => l.name).sort((a, b) => a.name.localeCompare(b.name))
-        .map((l) => ({ val: l.name, label: l.name, dot: l.color }));
-    }
-    return (this.viewer?.teams?.nodes ?? []).map((tm) => ({ val: tm.key, label: `${tm.key}  ${tm.name}` }));
-  }
-
   popButton(t, which, icon, label, dot) {
     const open = this.pop === which;
     return h_flex().id(`pb-${which}`).relative().size(34).flex_none().items_center().justify_center().rounded(8).border_1()
@@ -1879,117 +2237,19 @@ export default class Linear extends View {
 
   // A popover: a transparent layer over the window (a press on it closes) and the panel under the buttons.
   popView(t) {
-    const views = this.pop === "views";
-    const panel = views ? this.viewsPanel(t) : this.pop === "filter" ? this.filterPanel(t) : this.displayPanel(t);
-    const at = div().id("pop-panel").absolute().top(views ? 124 : 88);
+    const people = this.pop === "people";
+    const panel = people ? this.peoplePanel(t) : this.displayPanel(t);
+    const at = div().id("pop-panel").absolute().top(people ? 82 : 88);
     return div().absolute().inset_0()
       .child(div().id("pop-back").absolute().inset_0().on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openPop(null, cx); }))
-      .child((views ? at.left(12) : at.right(12)).on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+      .child((people ? at.left(12) : at.right(12)).on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
         .child(panel.rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()));
-  }
-
-  viewsPanel(t) {
-    const tr = T();
-    const typed = this.popInput.value().trim();
-    const slug = api.viewSlug(typed), pslug = slug ? null : api.projectSlug(typed);
-    const term = slug || pslug ? "" : typed.toLowerCase();
-    const label = (v) => `${v.name} ${v.team?.key ?? ""}`.toLowerCase();
-    const list = [...this.views]
-      .filter((v) => !term || label(v).includes(term))
-      .sort((a, b) => Number(a.shared) - Number(b.shared) || (a.team?.key ?? "").localeCompare(b.team?.key ?? "") || a.name.localeCompare(b.name));
-    const head = h_flex().h(40).px(12).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(Input.new(this.popInput).flex_1().h_full().text_size(12.5))
-      .when(!this.popInput.value(), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(tr.viewsFind)));
-    const rows = list.map((v, n) => this.menuRow(t, `pv-view-${n}`, this.tab === `${VIEW_TAB}${v.id}`, (cx) => { this.openPop(null, cx); this.setTab(`${VIEW_TAB}${v.id}`, cx); })
-      .child(div().w(12).flex_none().text_color(t.accent).child(this.tab === `${VIEW_TAB}${v.id}` ? "✓" : ""))
-      .child(div().size(8).flex_none().rounded(4).bg(v.color ?? t.dim))
-      .child(div().flex_1().min_w(0).truncate().child(v.name))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(v.kind === "project" ? tr.project : v.shared ? v.team?.key ?? tr.workspace : tr.personal))
-      .child(div().id(`pv-del-${n}`).flex_none().px(4).rounded(4).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_mouse_down("left", stop).on_click((_e, cx) => this.removeView(v.id, cx)).child("×")));
-    const fresh = (slug || pslug) && !this.views.some((v) => v.slugId === (slug ?? pslug));
-    const add = fresh ? this.menuRow(t, "pv-add", true, (cx) => (slug ? this.addView(slug, cx) : this.addView(pslug, cx, "project")))
-      .child(div().w(8).flex_none().text_color(t.accent).child("+"))
-      .child(div().flex_1().min_w(0).truncate().child(this.loading.has("addView") ? tr.loading : slug ? tr.addView : tr.addProject))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child("↵")) : null;
-    const body = v_flex().id("pop-views").p(6).gap(1).max_h(420).overflow_y_scrollbar()
-      .when(Boolean(add), (el) => el.child(add))
-      .children(rows)
-      .when(!rows.length && !add, (el) => el.child(div().p(10).text_size(12).text_color(t.dim).child(tr.noViews)));
-    return v_flex().w(340).child(head).child(body);
   }
 
   menuRow(t, id, on, action) {
     return h_flex().id(id).h(30).px(10).gap(9).items_center().rounded(6).flex_none().text_size(12.5).cursor_pointer()
       .when(on, (el) => el.bg(t.hover)).hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
       .on_click((_e, cx) => action(cx));
-  }
-
-  filterPanel(t) {
-    const tr = T();
-    const term = this.popInput.value().trim().toLowerCase();
-    const head = h_flex().h(40).px(12).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(Input.new(this.popInput).flex_1().h_full().text_size(12.5))
-      .when(!this.popInput.value(), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(this.popField ? tr.filterFind : tr.addFilter)));
-    const FIELDS = [["s", tr.fields.state, `${ICON}/state-started.svg`], ["@", tr.fields.assignee, `${ICON}/person.svg`],
-      ["p", tr.fields.priority, `${ICON}/prio-2.svg`], ["l", tr.fields.label, `${ICON}/label.svg`], ["#", tr.fields.team, `${ICON}/team.svg`]];
-    const list = v_flex().id("pop-list").p(6).gap(1).max_h(380).overflow_y_scrollbar();
-    if (!this.popField) {
-      const fields = FIELDS.filter(([, label]) => !term || label.toLowerCase().includes(term));
-      // Typing finds values across every field too.
-      const hits = term ? FIELDS.flatMap(([f, label]) => this.filterValues(f).filter((v) => v.label.toLowerCase().includes(term)).slice(0, 6).map((v) => ({ ...v, f, fl: label }))) : [];
-      list.children(fields.map(([f, label, icon]) => this.menuRow(t, `pf-${f}`, false, (cx) => { this.popField = f; this.popInput.set_value(""); cx.notify(); })
-        .child(svg(icon).size(14).flex_none().text_color(t.muted))
-        .child(div().flex_1().child(label))
-        .when(Q.chosen(this.query, f).length > 0, (el) => el.child(div().text_size(11).text_color(t.accent).child(String(Q.chosen(this.query, f).length))))
-        .child(div().text_size(11).text_color(t.dim).child("›"))));
-      list.children(hits.map((v, n) => this.valueRow(t, v.f, v, `ph-${n}`, v.fl)));
-      if (Q.parse(this.query).conds.length) {
-        list.child(div().h(1).my(4).bg(t.border))
-          .child(this.menuRow(t, "pf-clear", false, (cx) => this.setQuery(Q.withoutTokens(this.query), cx))
-            .child(div().w(14).flex_none().text_color(t.dim).child("×")).child(div().flex_1().text_color(t.muted).child(tr.clearFilters)));
-      }
-      return v_flex().w(280).child(head).child(list).child(this.presetFooter(t));
-    }
-    const f = this.popField;
-    const label = FIELDS.find((x) => x[0] === f)?.[1] ?? "";
-    const seg = (neg, text) => h_flex().id(`pn-${neg}`).h(24).px(10).items_center().rounded(5).text_size(11.5).cursor_pointer()
-      .bg(this.popNeg === neg ? t.selected : t.popover).text_color(this.popNeg === neg ? t.foreground : t.muted)
-      .on_mouse_down("left", stop).on_click((_e, cx) => { this.popNeg = neg; cx.notify(); }).child(text);
-    const bar = h_flex().h(38).px(8).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(h_flex().id("pf-back").h(26).px(6).gap(4).items_center().rounded(6).text_size(12.5).font_semibold().cursor_pointer()
-        .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click((_e, cx) => { this.popField = null; this.popInput.set_value(""); cx.notify(); }).child("‹").child(label))
-      .child(div().flex_1())
-      .child(h_flex().p(2).gap(2).rounded(7).border_1().border_color(t.border).child(seg(false, tr.is)).child(seg(true, tr.isNot)));
-    const vals = this.filterValues(f).filter((v) => !term || v.label.toLowerCase().includes(term));
-    list.children(vals.map((v, n) => this.valueRow(t, f, v, `pv-${n}`)));
-    if (!vals.length) list.child(div().p(10).text_size(12).text_color(t.dim).child(tr.noMatch));
-    return v_flex().w(280).child(bar).child(head).child(list).child(this.presetFooter(t));
-  }
-
-  // Under both menus: save what's shown as a preset (or that it's saved, with remove).
-  presetFooter(t) {
-    const tr = T(), n = this.savedIndex();
-    if (n < 0 && !this.canSave()) return div();
-    return h_flex().id("pf-save").h(36).px(12).gap(8).items_center().border_t(1).border_color(t.border).text_size(12)
-      .text_color(n >= 0 ? t.muted : t.accent).cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click((_e, cx) => this.toggleSaveFilter(cx))
-      .child(div().flex_1().child(n >= 0 ? tr.presetSaved : tr.savePreset))
-      .child(div().text_size(10.5).text_color(t.dim).child("⌃S"));
-  }
-
-  // One value: ✓ when it's in the search with the sign being added (⊘ when it's there as "is not").
-  valueRow(t, f, v, id, fieldLabel) {
-    const got = Q.chosen(this.query, f).find((c) => c.val.toLowerCase() === v.val.toLowerCase());
-    const on = got && got.neg === this.popNeg;
-    return this.menuRow(t, id, false, (cx) => this.setQuery(Q.toggleValue(this.query, f, this.popNeg, v.val), cx))
-      .child(div().w(14).flex_none().text_size(12).text_color(got ? (got.neg ? t.blocked : t.accent) : t.dim).child(got ? (got.neg ? "⊘" : "✓") : ""))
-      .when(Boolean(v.icon), (el) => el.child(svg(v.icon).size(13).flex_none().text_color(v.color ?? t.dim)))
-      .when(v.prio !== undefined, (el) => el.child(this.prioIcon(t, v.prio)))
-      .when(Boolean(v.dot), (el) => el.child(div().size(8).flex_none().rounded(4).bg(v.dot)))
-      .child(div().flex_1().min_w(0).truncate().text_color(on ? t.foreground : t.muted).child(v.label))
-      .when(Boolean(fieldLabel), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(fieldLabel)));
   }
 
   displayPanel(t) {
@@ -2022,89 +2282,193 @@ export default class Linear extends View {
       .when(Boolean(closedOpts), (el) => el.child(closedOpts))
       .child(row(tr.nestSub, toggle))
       .child(h_flex().mt(4).px(14).pt(8).gap(8).border_t(1).border_color(t.border).justify_end()
-        .when(this.canSave() || this.savedIndex() >= 0, (el) => el.child(this.button(t, "pd-save", this.savedIndex() >= 0 ? tr.presetSaved : tr.savePreset, (cx) => this.toggleSaveFilter(cx), this.savedIndex() < 0)))
         .child(this.button(t, "pd-reset", tr.reset, (cx) => this.resetDisplay(cx))));
   }
 
-  // Saved filters as pills; the active one is selected and has × to remove it. "+ Save" for a new search.
-  filterBar(t) {
-    const tr = T();
-    const active = this.savedIndex();
-    const pill = (id) => h_flex().id(id).h(24).px(9).gap(6).items_center().rounded(12).border_1().text_size(11.5).cursor_pointer()
-      .on_mouse_down("left", stop);
-    // The built-in views first (All, My issues, Recent: lists of their own, not searches), then saved searches.
-    const count = { mine: this.mine.length, recent: this.recent.length, all: this.all.length };
-    const views = TAB_IDS.map((id) => {
-      const on = !this.query.trim() && this.tab === id;
-      return pill(`lt-${id}`).border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover)
-        .text_color(on ? t.foreground : t.muted).hover((s) => s.bg(on ? t.selected : t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => { this.setTab(id, cx); this.focusList(); })
-        .child(tr.tabs[id]).child(div().text_size(10.5).text_color(t.dim).child(String(count[id] ?? "")));
-    });
-    const activeView = this.viewOf(this.tab);
-    const viewOn = Boolean(activeView) && !this.query.trim();
-    const viewsPill = pill("lt-views").border_color(viewOn || this.pop === "views" ? t.accent : t.border).bg(viewOn ? t.selected : t.popover)
-      .text_color(viewOn ? t.foreground : t.muted).hover((s) => s.bg(viewOn ? t.selected : t.hover).text_color(t.foreground))
-      .on_click((_e, cx) => this.openPop(this.pop === "views" ? null : "views", cx))
-      .child(div().max_w(220).truncate().child(activeView ? activeView.name : tr.views))
-      .when(viewOn, (el) => el.child(div().text_size(10.5).text_color(t.dim).child(String(this.viewData[activeView.id]?.nodes?.length ?? ""))))
+  peopleOf() {
+    const id = viewIdOf(this.tab);
+    if (!id) return [];
+    return this.peopleBy[id] ?? (this.viewer?.id ? [this.viewer.id] : []);
+  }
+
+  byTitle(list) {
+    const q = this.findInput.value().trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((i) => `${i.identifier} ${i.title ?? ""}`.toLowerCase().includes(q));
+  }
+
+  byPeople(list) {
+    const ids = this.peopleOf();
+    return ids.length ? list.filter((i) => ids.includes(i.assignee?.id ?? NOBODY)) : list;
+  }
+
+  peopleChoices() {
+    const me = this.viewer, seen = new Map();
+    for (const i of this.viewData[viewIdOf(this.tab)]?.nodes ?? []) {
+      const a = i.assignee;
+      if (a?.id && a.id !== me?.id && !seen.has(a.id)) seen.set(a.id, a.displayName ?? a.name);
+    }
+    for (const id of this.peopleOf()) if (id !== me?.id && id !== NOBODY && !seen.has(id)) seen.set(id, this.personName(id));
+    const others = [...seen].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
+    return [...(me ? [{ id: me.id, name: T().me }] : []), ...others, { id: NOBODY, name: T().unassigned }];
+  }
+
+  personName(id) {
+    const p = (this.people ?? []).find((u) => u.id === id);
+    return p?.displayName ?? p?.name ?? id;
+  }
+
+  togglePerson(id, cx) {
+    const view = viewIdOf(this.tab), now = this.peopleOf();
+    this.peopleBy = { ...this.peopleBy, [view]: now.includes(id) ? now.filter((x) => x !== id) : [...now, id] };
+    save("peopleBy", this.peopleBy);
+    this.sel = 0;
+    this.fillBoard(cx);
+    cx.notify();
+  }
+
+  everyone(cx) {
+    this.peopleBy = { ...this.peopleBy, [viewIdOf(this.tab)]: [] };
+    save("peopleBy", this.peopleBy);
+    this.sel = 0;
+    cx.notify();
+  }
+
+  findBox(t) {
+    const q = this.findInput.value();
+    return h_flex().id("l-find").h(28).w(320).flex_shrink_1().min_w(140).px(10).gap(8).items_center().rounded(8).border_1()
+      .border_color(this.finding ? t.accent : t.input).bg(t.background).on_mouse_down("left", stop)
+      .child(svg(`${ICON}/search.svg`).size(13).text_color(t.dim))
+      .child(Input.new(this.findInput).flex_1().h_full().text_size(12.5).text_color(t.foreground))
+      .when(!q, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(T().findTitle)))
+      .when(Boolean(q), (el) => el.child(this.miniButton(t, "l-find-clear", "×", (cx) => { this.findInput.set_value(""); this.sel = 0; cx.notify(); })));
+  }
+
+  peopleButton(t) {
+    const tr = T(), ids = this.peopleOf(), open = this.pop === "people";
+    const names = this.peopleChoices().filter((p) => ids.includes(p.id)).map((p) => p.name);
+    const label = !ids.length ? tr.everyone : names.length <= 2 ? names.join(", ") : `${names[0]} +${names.length - 1}`;
+    return h_flex().id("pb-people").h(28).px(10).gap(6).flex_none().items_center().rounded(8).border_1()
+      .border_color(open ? t.accent : ids.length ? t.accent : t.border).bg(open ? t.selected : t.background).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+      .on_click((_e, cx) => this.openPop(open ? null : "people", cx))
+      .child(svg(`${ICON}/person.svg`).size(14).text_color(ids.length ? t.accent : t.muted))
+      .child(div().max_w(260).truncate().text_size(12).child(label))
       .child(div().text_size(10).text_color(t.dim).child("▾"));
-    return h_flex().gap(6).flex_wrap().items_center()
-      .children(views)
-      .child(viewsPill)
-      .when(this.filters.length > 0, (el) => el.child(div().w(1).h(16).mx(2).bg(t.border)))
-      .children(this.filters.map((f, n) => {
-        const on = n === active;
-        if (this.renaming === n) {
-          return h_flex().id(`lf-r-${n}`).h(24).w(200).px(9).gap(6).items_center().rounded(12).border_1().border_color(t.accent).bg(t.background)
-            .on_mouse_down("left", stop)
-            .child(Input.new(this.renameInput).flex_1().h_full().text_size(11.5))
-            .when(!this.renameInput.value(), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(tr.renameHint)));
-        }
-        const asking = this.confirmDel === n;
-        const icon = (id, label, action, color) => div().id(id).px(3).rounded(4).text_color(color ?? t.dim).hover((s) => s.text_color(t.foreground).bg(t.hover))
-          .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); action(cx); }).child(label);
-        return pill(`lf-${n}`).border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover)
-          .text_color(on ? t.foreground : t.muted).hover((s) => s.bg(on ? t.selected : t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => this.applyFilter(n, cx))
-          .when(n < 9, (el) => el.child(div().text_size(10.5).text_color(t.dim).child(`⌃${n + 1}`)))
-          .when(Boolean(f.sort), (el) => el.child(svg(`${ICON}/sliders.svg`).size(11).flex_none().text_color(on ? t.accent : t.dim)))
-          .child(div().max_w(260).truncate().child(this.presetLabel(f)))
-          .when(on || asking, (el) => el.child(icon(`lf-e-${n}`, "✎", (cx) => this.startRename(n, cx))))
-          .when(on || asking, (el) => el.child(asking
-            ? icon(`lf-x-${n}`, tr.deleteAsk, (cx) => this.askDelete(n, cx), t.blocked)
-            : icon(`lf-x-${n}`, "×", (cx) => this.askDelete(n, cx))));
-      }))
-      .when(this.canSave() && active < 0, (el) => el.child(pill("lf-save").border_color(t.border).text_color(t.muted)
-        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => this.toggleSaveFilter(cx))
-        .child(tr.saveFilter).child(div().text_size(10.5).text_color(t.dim).child("⌃S"))));
+  }
+
+  peoplePanel(t) {
+    const tr = T(), ids = this.peopleOf();
+    const row = (key, on, label, action, avatar) => this.menuRow(t, `pp-${key}`, false, action)
+      .child(div().size(14).flex_none().rounded(3).border_1().border_color(on ? t.accent : t.border).bg(on ? t.accent : t.popover))
+      .when(Boolean(avatar), (el) => el.child(this.avatar(t, avatar, 16)))
+      .child(div().flex_1().min_w(0).truncate().child(label));
+    return v_flex().id("people-panel").w(260).max_h(420).p(4).gap(1).overflow_y_scrollbar()
+      .child(row("all", !ids.length, tr.everyone, (cx) => this.everyone(cx)))
+      .child(div().h(1).my(3).bg(t.border))
+      .children(this.peopleChoices().map((p) => row(p.id, ids.includes(p.id), p.name, (cx) => this.togglePerson(p.id, cx), p.id === NOBODY ? null : p.name)));
   }
 
   listView(t) {
     const rows = this.rows();
     if (!rows.length) {
-      const msg = this.query ? (this.loading.has("search") ? T().searching : T().noMatch)
-        : this.tab === "recent" ? T().noRecent : this.loading.size ? T().loading : T().noIssues;
-      if (!this.canWrite && !this.query) return this.empty(t, msg).gap(10)
+      const msg = this.loading.size ? T().loading : T().noIssues;
+      if (!this.canWrite) return this.empty(t, msg).gap(10)
         .child(this.button(t, "l-connect", this.connecting ? T().connecting : T().connectLinear, (cx) => this.connect(cx)));
       return this.empty(t, msg);
     }
-    const pickable = rows.filter((r) => r.kind !== "head");
+    const pickable = this.pickable();
     const sel = pickable[Math.min(this.sel, pickable.length - 1)];
-    return v_flex().id("l-list").flex_1().w_full().min_h(0).py(4).overflow_y_scrollbar()
+    const height = rows.reduce((h, r) => h + this.rowHeight(r), 0);
+    return v_flex().id("l-list").flex_1().w_full().min_h(0).py(4).overflow_y_scrollbar().track_scroll(this.listScroll)
+      .on_scroll_wheel((e, cx) => { if (this.wheelNearEnd(`l:${this.tab}`, e, height)) this.nearEnd(Infinity, 0, cx); })
       .children(rows.map((r, n) => this.row(t, r, r === sel, pickable.indexOf(r), n)));
+  }
+
+  wheelNearEnd(key, e, height) {
+    const view = e.bounds?.height ?? this.height;
+    const max = Math.max(0, height - view);
+    this.wheel[key] = Math.max(0, Math.min(max, (this.wheel[key] ?? 0) - (e.delta?.y ?? 0)));
+    return e.delta?.y < 0 && max - this.wheel[key] < MORE_AHEAD * ROW_H;
+  }
+
+  homeView(t) {
+    const tr = T();
+    const rows = this.homeRows();
+    const pick = rows.filter((r) => r.kind !== "head");
+    const sel = pick[Math.min(this.homeSel, pick.length - 1)];
+    const search = h_flex().px(12).py(8).flex_none().border_b(1).border_color(t.border)
+      .child(h_flex().id("h-search").h(34).flex_1().px(10).gap(8).items_center().rounded(8).border_1().border_color(t.input).bg(t.background)
+        .on_mouse_down("left", stop)
+        .child(svg(`${ICON}/search.svg`).size(14).text_color(t.dim))
+        .child(Input.new(this.homeInput).flex_1().h_full().text_size(12.8).text_color(t.foreground))
+        .when(!this.homeInput.value(), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(tr.homeFind))));
+    const tabs = h_flex().px(12).pt(8).gap(6).flex_none().children([["projects", tr.homeProjects], ["views", tr.views]].map(([id, label]) => {
+      const on = this.homeTab === id;
+      return h_flex().id(`h-ht-${id}`).h(24).px(10).items_center().rounded(12).border_1().text_size(11.5).cursor_pointer()
+        .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
+        .hover((s) => s.bg(on ? t.selected : t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.setHomeTab(id, cx)).child(label);
+    }));
+    const head = v_flex().flex_none().child(search).child(tabs);
+    const busy = [...this.loading].some((k) => k.startsWith("projects:") || k === "views");
+    const none = this.homeTab === "views" ? tr.noViews : tr.noProjects;
+    if (!rows.some((r) => r.kind === "item")) {
+      const empty = this.empty(t, busy ? tr.loading : none);
+      return v_flex().flex_1().min_h(0).child(head).child(rows[0]?.kind === "tickets" ? v_flex().py(4).child(div().h(ROW2_H).child(this.homeRow(t, rows[0], rows[0] === sel, 0, 0))) : div())
+        .child(!this.canWrite ? empty.gap(10).child(this.button(t, "h-connect", this.connecting ? tr.connecting : tr.connectLinear, (cx) => this.connect(cx))) : empty);
+    }
+    const sizes = rows.map((r) => (r.kind === "head" ? HEAD_H : r.kind === "tickets" ? ROW2_H : ROW_H));
+    const height = sizes.reduce((a, b) => a + b, 0);
+    const key = `h:${this.homeInput.value().trim()}`;
+    return v_flex().flex_1().min_h(0).w_full().child(head)
+      .child(v_flex().id("h-list").flex_1().w_full().min_h(0).py(4).overflow_y_scrollbar().track_scroll(this.homeScroll)
+        .on_scroll_wheel((e, cx) => { if (this.homeTab === "projects" && this.wheelNearEnd(key, e, height)) this.loadProjects(cx, true); })
+        .children(rows.map((r, n) => div().h(sizes[n]).w_full().flex_none().child(this.homeRow(t, r, r === sel, pick.indexOf(r), n)))));
+  }
+
+  homeRow(t, r, on, index, n) {
+    const tr = T();
+    if (r.kind === "head") return div().px(14).pt(10).pb(3).text_size(11).font_semibold().text_color(t.dim).child(r.text);
+    const base = (id) => h_flex().id(id).mx(6).px(8).h_full().gap(10).items_center().rounded(6).cursor_pointer()
+      .when(on, (el) => el.bg(t.selected)).hover((s) => s.bg(on ? t.selected : t.hover))
+      .on_mouse_down("left", stop)
+      .on_click((e, cx) => {
+        if (on || e.click_count === 2) this.activateHome(r, cx);
+        else { this.homeSel = index; cx.notify(); }
+      });
+    if (r.kind === "tickets") {
+      return base("h-tickets")
+        .child(svg(`${ICON}/person.svg`).size(15).flex_none().text_color(t.accent))
+        .child(div().flex_1().min_w(0).text_size(13).font_semibold().child(tr.tabs.mine))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child(String(this.mine.length)))
+        .child(div().flex_none().text_size(11).text_color(t.dim).child("↵"));
+    }
+    const p = r.item;
+    const where = p.kind === "view" ? (p.team?.key ?? (p.shared ? tr.workspace : tr.personal)) : (p.teams ?? []).join(" ");
+    return base(`h-p-${n}`)
+      .child(div().id(`h-fav-${n}`).w(18).flex_none().text_color(r.fav ? STAR : t.dim).hover((s) => s.text_color(STAR))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.toggleFav(p, cx); })
+        .child(svg(`${ICON}/${r.fav ? "star-fill" : "star"}.svg`).size(14)))
+      .child(div().flex_1().min_w(0).truncate().child(p.name))
+      .when(Boolean(where), (el) => el.child(div().flex_none().max_w(140).truncate().text_size(11).text_color(t.dim).child(where)))
+      .when(Boolean(p.status), (el) => el.child(div().w(90).flex_none().truncate().text_size(11).text_color(t.muted).child(p.status.name)));
+  }
+
+  fillBoard(cx) {
+    if ((this.layout === "board" || this.peopleOf().length || this.findInput.value().trim()) && this.mode === "list" && this.hasMore() && this.pickable().length < BOARD_MAX) this.loadMore(cx);
   }
 
   boardView(t) {
     const cols = this.boardColumns();
-    const extras = this.pickable().filter((r) => r.kind === "more");
-    if (!cols.length && !extras.length) return this.listView(t);
+    if (!cols.length) return this.listView(t);
     const sel = this.selected();
-    const busy = this.loading.has("all") || this.loading.has(`v:${viewIdOf(this.tab)}`);
+    const kids = new Map();
+    for (const col of cols) for (const x of col.cards) {
+      const p = x.r.issue.parent?.identifier;
+      if (p) kids.set(p, (kids.get(p) ?? 0) + 1);
+    }
     return v_flex().flex_1().min_h(0).w_full()
-      .when(extras.length > 0, (el) => el.child(h_flex().px(12).pt(10).gap(8).children(extras.map((r) =>
-        this.button(t, `bx-${r.kind}`, busy ? T().loading : T().more, (cx) => this.activate(r, cx))))))
       .child(h_flex().id("l-board").flex_1().min_h(0).w_full().p(12).gap(12).overflow_x_scrollbar()
         .children(cols.map((col, n) => v_flex().w(BOARD_COL).flex_none().h_full().min_h(0).gap(8)
           .child(h_flex().h(26).px(4).gap(8).items_center().flex_none()
@@ -2112,16 +2476,16 @@ export default class Linear extends View {
             .child(div().min_w(0).truncate().text_size(12.5).font_semibold().child(col.key))
             .child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(col.cards.length))))
           .child(v_flex().id(`bc-${n}`).flex_1().min_h(0).gap(6).overflow_y_scrollbar()
-            .children(col.cards.map((x) => this.boardCard(t, x, x.r === sel)))))));
+            .children(col.cards.map((x) => this.boardCard(t, x, x.r === sel, kids)))))));
   }
 
-  boardCard(t, x, on) {
+  boardCard(t, x, on, kids) {
     const { r, index } = x, i = r.issue;
     const pr = api.mainPr(i), link = this.links?.[i.identifier];
-    const labels = (i.labels?.nodes ?? []).slice(0, 3);
+    const labels = i.labels?.nodes ?? [];
     const who = i.assignee?.displayName ?? i.assignee?.name ?? null;
     const mine = this.assignedToMe(i);
-    const nested = (x.guides?.length ?? 0) > 0;
+    const children = this.details[i.identifier]?.relations?.children?.length || kids.get(i.identifier) || 0;
     const card = v_flex().id(`bk-${i.identifier}`).relative().p(10).gap(6).rounded(8).border_1()
       .border_color(on ? t.accent : t.border).bg(on ? t.selected : i.parent ? SUB_BG : t.surface).cursor_pointer().hover((s) => s.border_color(t.accent))
       .when(CLOSED.has(i.state?.type), (el) => el.opacity(0.6))
@@ -2134,96 +2498,98 @@ export default class Linear extends View {
         .child(div().flex_1())
         .when(Boolean(r.pin), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(T().currentBranch)))
         .when(Boolean(pr), (el) => el.child(this.prBadge(t, pr, `bp-${i.identifier}`)))
-        .when(Boolean(link), (el) => el.child(this.agentBadge(t, link, `bb-${i.identifier}`))))
-      .when(Boolean(i.parent) && !nested, (el) => el.child(h_flex().w_full().gap(4).text_size(10.5).text_color(t.dim)
-        .child(div().flex_none().child("↳")).child(div().flex_none().child(i.parent.identifier))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(i.parent.title ?? ""))))
+        .when(Boolean(link), (el) => el.child(this.agentBadge(t, link, `bb-${i.identifier}`, true))))
       .child(div().w_full().text_size(12.5).child(i.title))
-      .when(labels.length > 0 || Boolean(who), (el) => el.child(h_flex().gap(4).items_center()
+      .when(labels.length > 0, (el) => el.child(h_flex().gap(4).flex_wrap().items_center()
         .children(labels.map((l) => h_flex().h(18).px(6).gap(4).items_center().rounded(9).border_1().border_color(t.border).text_size(10.5).text_color(t.muted)
-          .child(div().size(6).rounded(3).bg(l.color ?? t.dim)).child(div().max_w(80).truncate().child(l.name))))
-        .child(div().flex_1())
-        .when(Boolean(who), (el) => el.child(h_flex().flex_none().gap(5).items_center()
-          .child(this.avatar(t, who, 16)).child(div().max_w(110).truncate().text_size(11).text_color(mine ? t.accent : t.dim).when(mine, (el) => el.font_semibold()).child(who))))));
-    if (!nested) return card.w_full().flex_none();
-    return div().flex().flex_row().items_stretch().w_full().flex_none()
-      .child(this.boardGuides(t, x.guides)).child(card.flex_1().min_w(0));
+          .child(div().size(6).rounded(3).bg(l.color ?? t.dim)).child(div().child(l.name))))))
+      .when(Boolean(who), (el) => el.child(mine ? h_flex().child(this.mineBadge(t, who, true))
+        : h_flex().gap(5).items_center().child(this.avatar(t, who, 16)).child(div().text_size(11).text_color(t.dim).child(who))));
+    const family = (key, color, label, rest, action) => h_flex().id(`bf-${key}-${i.identifier}`).w_full().h(24).px(8).gap(6).items_center().rounded(6)
+      .bg(`${color}1f`).border_1().border_color(`${color}66`).text_size(11)
+      .when(Boolean(action), (el) => el.cursor_pointer().hover((st) => st.bg(`${color}33`)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { cx.stop_propagation(); action(cx); }))
+      .child(div().flex_none().font_semibold().text_color(color).child(label))
+      .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(rest));
+    return card.w_full().flex_none()
+      .when(children > 0, (el) => el.child(family("parent", t.accent, T().parentTicket, T().subCount(children))))
+      .when(Boolean(i.parent), (el) => el.child(family("child", t.working, T().childOf(i.parent.identifier), i.parent.title ?? "",
+        (cx) => this.openDetail(i.parent.identifier, cx, true))));
   }
 
-  boardGuides(t, guides) {
-    const col = (g) => {
-      const c = div().relative().w(BOARD_STEP).flex_none();
-      const line = (el) => el.child(div().absolute().left(BOARD_X).top(-6).bottom(-6).w(1).bg(t.border));
-      if (g === "line") return line(c);
-      if (g === "mid" || g === "end") {
-        return (g === "mid" ? line(c) : c).child(div().absolute().left(BOARD_X).top(-6).h(25).w(BOARD_STEP - BOARD_X)
-          .border_l(1).border_b(1).rounded_bl(6).border_color(t.border));
-      }
-      return c;
-    };
-    return div().flex().flex_row().items_stretch().flex_none().children(guides.map(col));
+  rowFacts(r) {
+    const i = r.issue;
+    const w = this.width;
+    const sub = this.nest && r.depth !== undefined && r.depth > 0;
+    const labels = i.labels?.nodes ?? [];
+    const who = i.assignee?.displayName ?? i.assignee?.name ?? null;
+    const parentRef = Boolean(i.parent) && !sub;
+    const project = w >= 980 ? i.project?.name ?? null : null;
+    return { w, sub, labels, who, parentRef, project, meta: labels.length > 0 || Boolean(who) || parentRef || Boolean(project) };
+  }
+
+  rowHeight(r) {
+    if (r.kind === "head") return HEAD_H;
+    return this.rowFacts(r).meta ? ROW2_H : ROW_H;
   }
 
   row(t, r, on, index, n) {
     if (r.kind === "head") return div().px(14).pt(10).pb(3).text_size(11).font_semibold().text_color(t.dim).child(r.text);
-    const base = (id) => h_flex().id(id).mx(6).px(8).h(30).gap(8).items_center().rounded(6).cursor_pointer()
+    const base = (id) => h_flex().id(id).mx(6).px(8).gap(8).rounded(6).cursor_pointer()
       .when(on, (el) => el.bg(t.selected)).hover((s) => s.bg(on ? t.selected : t.hover))
       .on_mouse_down("left", stop)
       .on_click((e, cx) => {
         this.focusList();
         if (on || e.click_count === 2) this.activate(r, cx);
-        else { this.sel = index; this.schedulePreview(cx); cx.notify(); }
+        else { this.sel = index; cx.notify(); }
       });
-    if (r.kind === "more") return base("l-more").mt(4).text_color(t.muted).child(this.loading.has("all") || this.loading.has(this.tab) ? T().loading : T().more);
     const i = r.issue;
     const link = this.links?.[i.identifier];
     const pr = api.mainPr(i);
-    // The list's own width: beside the preview it's the left panel, else the window.
-    const w = this.width >= WIDE && this.layout === "split" && this.mode === "list" ? this.listW : this.width;
-    const nest = this.nest && r.depth !== undefined;
-    // Done and canceled issues fade, so open work stands out.
+    const { w, sub, labels, who, parentRef, project, meta } = this.rowFacts(r);
     const closed = CLOSED.has(i.state?.type);
-    const labels = (i.labels?.nodes ?? []).slice(0, 2);
     const mine = this.assignedToMe(i);
-    return base(`l-${i.identifier}-${n}`).relative()
+    const headH = link ? 30 : LINE_H;
+    const head = h_flex().h(headH).gap(8).items_center()
+      .child(this.prioIcon(t, i.priority))
+      .child(div().id(`l-id-${i.identifier}-${n}`).flex_none().text_size(11.5).text_color(t.dim).cursor_pointer()
+        .hover((s) => s.text_color(t.accent)).on_mouse_down("left", stop)
+        .on_click((_e, cx) => { cx.stop_propagation(); this.copy(i.identifier, "ID", cx); }).child(i.identifier))
+      .child(svg(stateIcon(i.state)).size(14).flex_none().text_color(i.state?.color ?? t.dim))
+      .child(div().flex_1().min_w(0).truncate().text_color(closed ? t.muted : t.foreground).when(closed, (el) => el.line_through()).child(i.title))
+      .when(Boolean(r.progress), (el) => el.child(this.progressPill(t, r, `lpg-${i.identifier}-${n}`)))
+      .when(Boolean(r.pin), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(T().currentBranch)))
+      .when(Boolean(pr), (el) => el.child(this.prBadge(t, pr, `lp-${i.identifier}-${n}`)))
+      .when(Boolean(link), (el) => el.child(this.agentBadge(t, link, `lb-${i.identifier}-${n}`, true)))
+      .when(w >= 760, (el) => el.child(div().w(88).flex_none().truncate().text_size(11).text_color(t.muted).child(i.state?.name ?? "")))
+      .when(w >= 760, (el) => el.child(div().w(48).flex_none().text_size(11).text_color(t.dim).child(ago(i.updatedAt))));
+    const details = h_flex().min_h(META_H).pl(22).gap(6).items_center().min_w(0).flex_wrap()
+      .when(parentRef, (el) => el.child(h_flex().flex_none().max_w(220).gap(4).text_size(10.5).text_color(t.dim)
+        .child(div().flex_none().child(`↳ ${i.parent.identifier}`))
+        .child(div().min_w(0).truncate().text_color(t.muted).child(i.parent.title ?? ""))))
+      .when(Boolean(who), (el) => el.child(mine ? this.mineBadge(t, who, false) : h_flex().flex_none().gap(5).items_center()
+        .child(this.avatar(t, who, 14))
+        .child(div().text_size(11).text_color(t.muted).child(who))))
+      .children(labels.map((l) => h_flex().flex_none().h(17).px(6).gap(4).items_center().rounded(9).border_1().border_color(t.border).text_size(10.5).text_color(t.muted)
+        .child(div().size(6).rounded(3).bg(l.color ?? t.dim)).child(div().child(l.name))))
+      .when(Boolean(project), (el) => el.child(div().flex_none().max_w(160).truncate().text_size(10.5).text_color(t.dim).child(project)));
+    return base(`l-${i.identifier}-${n}`).relative().when(meta, (el) => el.min_h(ROW2_H)).when(!meta, (el) => el.h(ROW_H))
+      .when(sub && !on, (el) => el.bg(SUB_BG))
       .when(mine, (el) => el.child(div().absolute().left(0).top(7).bottom(7).w(3).rounded(2).bg(t.accent)))
-      .when(nest && r.depth > 0, (el) => el.child(this.treeGuides(t, r.guides)))
-      .child(h_flex().flex_1().min_w(0).h_full().gap(8).items_center().when(closed, (el) => el.opacity(0.45))
-        .child(this.prioIcon(t, i.priority))
-        .child(h_flex().w(76).flex_none().child(div().id(`l-id-${i.identifier}-${n}`).text_size(11.5).text_color(t.dim).truncate().cursor_pointer()
-          .hover((s) => s.text_color(t.accent)).on_mouse_down("left", stop)
-          .on_click((_e, cx) => { cx.stop_propagation(); this.copy(i.identifier, "ID", cx); }).child(i.identifier)))
-        .child(svg(stateIcon(i.state)).size(14).flex_none().text_color(i.state?.color ?? t.dim))
-        .when(Boolean(i.parent) && !(nest && r.depth > 0), (el) => el.child(h_flex().flex_none().gap(3).text_size(10.5).text_color(t.dim)
-          .child("↳").child(i.parent.identifier)))
-        .child(div().flex_1().min_w(0).truncate().text_color(closed ? t.muted : t.foreground).when(closed, (el) => el.line_through()).child(i.title))
-        .when(Boolean(r.progress), (el) => el.child(this.progressPill(t, r, `lpg-${i.identifier}-${n}`)))
-        .when(Boolean(r.pin), (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child(T().currentBranch)))
-        .when(Boolean(pr), (el) => el.child(this.prBadge(t, pr, `lp-${i.identifier}-${n}`)))
-        .when(Boolean(link), (el) => el.child(this.agentBadge(t, link, `lb-${i.identifier}-${n}`)))
-        // The list alone has room for more: labels and project, state, assignee, last update.
-        .when(w >= 980 && labels.length > 0, (el) => el.child(h_flex().flex_none().gap(4).children(labels.map((l) =>
-          h_flex().h(18).px(6).gap(4).items_center().rounded(9).border_1().border_color(t.border).text_size(10.5).text_color(t.muted)
-            .child(div().size(6).rounded(3).bg(l.color ?? t.dim)).child(div().max_w(90).truncate().child(l.name))))))
-        .when(w >= 980, (el) => el.child(div().w(120).flex_none().truncate().text_size(11).text_color(t.dim).child(i.project?.name ?? "")))
-        .when(w >= 760, (el) => el.child(div().w(96).flex_none().truncate().text_size(11).text_color(t.muted).child(i.state?.name ?? "")))
-        .when(w >= 400, (el) =>
-          el.child(div().w(w >= 760 ? 96 : 72).flex_none().truncate().text_size(11).text_color(mine ? t.accent : t.dim).when(mine, (el) => el.font_semibold())
-            .child(i.assignee?.displayName ?? i.assignee?.name ?? "")))
-        .when(w >= 760, (el) => el.child(div().w(56).flex_none().text_size(11).text_color(t.dim).child(ago(i.updatedAt)))));
+      .when(sub, (el) => el.child(this.treeGuides(t, r.guides, meta ? 2 + headH / 2 : ROW_H / 2)))
+      .child((meta ? v_flex().flex_1().min_w(0).py(2).gap(2) : v_flex().flex_1().min_w(0).h_full().gap(2).justify_center()).when(closed, (el) => el.opacity(0.45))
+        .child(head)
+        .when(meta, (el) => el.child(details)));
   }
 
-  // Tree lines left of a sub-issue: a column per level, the line under the parent's priority icon,
-  // a rounded elbow into the row on its own level. Rows touch (30 px, no gap), so the lines join.
-  treeGuides(t, guides) {
-    // The row's 8 px gap follows the last column, so it's that much narrower: level d's icon starts d steps in.
+  treeGuides(t, guides, elbow) {
     const col = (g, n) => {
       const c = div().relative().w(n === guides.length - 1 ? TREE_STEP - 8 : TREE_STEP).h_full().flex_none();
-      const line = (el) => el.child(div().absolute().left(TREE_X).top(0).bottom(0).w(1).bg(t.border));
+      const line = (el) => el.child(div().absolute().left(TREE_X).top(0).bottom(0).w(1).bg(t.dim));
       if (g === "line") return line(c);
       if (g === "mid" || g === "end") {
-        return (g === "mid" ? line(c) : c).child(div().absolute().left(TREE_X).top(0).h(15).w(TREE_STEP - TREE_X - 3)
-          .border_l(1).border_b(1).rounded_bl(6).border_color(t.border));
+        return (g === "mid" ? line(c) : c).child(div().absolute().left(TREE_X).top(0).h(elbow).w(TREE_STEP - TREE_X - 3)
+          .border_l(1).border_b(1).rounded_bl(6).border_color(t.dim));
       }
       return c;
     };
@@ -2264,21 +2630,26 @@ export default class Linear extends View {
       .child(`${big && pr.repo ? `${pr.repo} ` : ""}#${pr.number ?? ""}`)
       .when(Boolean(pr.review), (el) => el.child(div().text_color(REVIEW_COLOR[pr.review]).font_semibold().child(pr.review === "approved" ? "✓" : "±")))
       .when(pr.conflicts, (el) => el.child(div().text_color(t.blocked).child("⚠")))
-      .when(Boolean(words), (el) => el.child(div().text_color(t.muted).child(words)))
-      .when(big, (el) => el.child(div().text_color(t.dim).child("Y")));
+      .when(Boolean(words), (el) => el.child(div().text_color(t.muted).child(words)));
   }
 
   // The agent in the issue's tab. Clicking goes to that tab.
+  mineBadge(t, who, big) {
+    return h_flex().flex_none().h(big ? 26 : 20).pl(3).pr(big ? 9 : 7).gap(6).items_center().rounded(13)
+      .bg(`${t.accent}26`).border_1().border_color(t.accent)
+      .child(this.avatar(t, who, big ? 20 : 15))
+      .child(div().text_size(big ? 12 : 11).font_semibold().text_color(t.accent).child(who));
+  }
+
   agentBadge(t, link, id, big = false) {
     const st = link.tab.status, a = T().agent, prog = link.program;
     const color = st === "working" ? t.working : st === "blocked" ? t.blocked : st === "done" ? t.done : t.dim;
     const label = st === "working" ? elapsed(Date.now() - (link.tab.working_since ?? Date.now()))
-      : st === "blocked" ? a.blocked : link.watching ? a.watching[link.watching] : st === "done" ? a.done : big ? a.idle : a.tab;
-    const icon = prog?.key === "claude" || link.watching
-      ? svg(prog?.icon ?? CLAUDE_ICON).size(big ? 14 : 12).text_color(prog?.color ?? CLAUDE)
-      : prog?.icon ? svg(prog.icon).size(big ? 13 : 11).text_color(prog.color ?? color)
-      : svg(`${ICON}/terminal.svg`).size(big ? 13 : 11).text_color(color);
-    return h_flex().id(id).flex_none().h(big ? 24 : 20).px(big ? 8 : 6).gap(5).items_center().rounded(5).cursor_pointer()
+      : st === "blocked" ? a.blocked : link.watching ? a.watching[link.watching] : st === "done" ? a.done : a.idle;
+    const claude = prog?.key === "claude" || Boolean(link.watching);
+    const tint = claude ? CLAUDE : prog?.agent ? prog?.color ?? AGENT_COLOR[prog.key] ?? AGENT_COLOR.other : color;
+    const icon = svg(prog?.icon ?? (claude ? CLAUDE_ICON : `${ICON}/terminal.svg`)).size(big ? 22 : 16).flex_none().text_color(tint);
+    return h_flex().id(id).flex_none().h(big ? 30 : 22).px(big ? 9 : 6).gap(5).items_center().rounded(5).cursor_pointer()
       .border_1().border_color(st === "working" ? color : t.border)
       .text_size(big ? 12 : 11).text_color(color).hover((s) => s.bg(t.hover))
       .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.goTab(link); })
@@ -2287,6 +2658,7 @@ export default class Linear extends View {
       .when(st === "blocked" || (st === "done" && !link.watching), (el) => el.child(div().size(6).rounded(3).bg(color)))
       .child(label);
   }
+
 
   // ── Lightbox ──────────────────────────────────────────
   // Every loaded image of the shown issue (description, then comments), so ← → walk through them.
@@ -2361,12 +2733,12 @@ export default class Linear extends View {
     return v_flex().gap(8).w_full().children(parts.map((part, n) => {
       if (part.kind === "table") return this.table(t, `${key}-t${n}`, part, maxW);
       if (part.kind === "text") {
-        return TextView.markdown(`${key}-${n}`, part.text).selectable().on_link_click((url, cx) => this.openUrl(url, cx));
+        return TextView.markdown(`${key}-${n}`, part.text).selectable().on_link_click((url, cx) => { this.linkAt = Date.now(); this.openUrl(url, cx); });
       }
       const img = this.image(part.url);
       // An upload link whose file isn't an image (a PDF, a video): the link it was.
       if (part.link && img?.state === "error" && /type/.test(img.why ?? "")) {
-        return TextView.markdown(`${key}-${n}`, part.src).selectable().on_link_click((url, cx) => this.openUrl(url, cx));
+        return TextView.markdown(`${key}-${n}`, part.src).selectable().on_link_click((url, cx) => { this.linkAt = Date.now(); this.openUrl(url, cx); });
       }
       if (img?.state === "ok" && img.w > 0) {
         // Retina screenshots show at half their pixel size. Fit the width and at most 520 px of height.
@@ -2539,81 +2911,22 @@ export default class Linear extends View {
   // The outline on the right, a map of the page: the description's headings, then each comment
   // thread. The item at the top of the view is marked, the ones on screen are brighter, and it keeps
   // the marked one in sight as the page scrolls. A click scrolls the page there.
-  outlineView(t, id, secs, thr, S, onScreen, w) {
-    const tr = T();
-    const heads = secs.filter((s) => s.title);
-    const minL = Math.min(...heads.map((s) => s.level), 3);
-    const ROW = 26, GAP = 1, PAD = 12;
-    const item = (key, el, indent = 0) => {
-      const on = key === S.active, seen = onScreen.has(key);
-      return h_flex().id(`ol-${key}`).h(ROW).flex_none().pl(8 + indent).pr(8).gap(6).items_center().rounded(6).min_w(0)
-        .text_size(12).text_color(on || seen ? t.foreground : t.dim).cursor_pointer()
-        .border_r(2).border_color(on ? t.accent : seen ? t.border : "#00000000").when(on, (e) => e.bg(t.hover).font_semibold())
-        .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
-        .on_click((_e, cx) => this.jump(id, key, cx)).child(el);
-    };
-    const group = (key, label, count) => item(key, h_flex().flex_1().min_w(0).gap(6).items_center()
-      .child(div().flex_1().min_w(0).truncate().text_size(11).font_semibold().text_color(t.dim).child(label))
-      .when(count !== undefined, (e) => e.child(div().text_size(11).text_color(t.dim).child(String(count)))));
-    const short = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : `${d.getMonth() + 1}/${d.getDate()}`; };
-    const rows = [group("top", tr.body), ...heads.map((s) => item(s.key, div().flex_1().min_w(0).truncate().child(s.title), (s.level - minL) * 12))];
-    if (thr) {
-      rows.push(group("cmts", tr.commentsTitle, thr.reduce((n, x) => n + 1 + x.replies.length, 0)));
-      for (const x of thr) {
-        const c = x.comment, name = c.user?.displayName ?? c.user?.name ?? tr.unknownUser;
-        rows.push(item(`c:${c.id}`, h_flex().flex_1().min_w(0).gap(6).items_center()
-          .child(this.avatar(t, name, 16))
-          .child(div().flex_1().min_w(0).truncate().child(name))
-          .when(x.replies.length > 0, (e) => e.child(div().flex_none().text_size(10.5).text_color(t.dim).child(`↳${x.replies.length}`)))
-          .child(div().flex_none().text_size(10.5).text_color(t.dim).child(short(c.createdAt)))));
-      }
-    }
-    // Follow: when the marked item changes, bring its row into the middle third.
-    const total = PAD * 2 + rows.length * (ROW + GAP);
-    const olMax = Math.max(0, total - S.olView);
-    const ai = S.keys.indexOf(S.active);
-    if (S.olFollow !== S.active && ai >= 0 && S.olView > 0) {
-      const top = PAD + ai * (ROW + GAP);
-      if (top < S.ol + S.olView / 3 || top + ROW > S.ol + (S.olView * 2) / 3) S.ol = top - S.olView / 3;
-      S.olFollow = S.active;
-    }
-    S.ol = Math.max(0, Math.min(olMax, S.ol));
-    return v_flex().id(`ol-${id}`).w(w).flex_none().h_full().min_h(0).overflow_hidden().border_l(1).border_color(t.border)
-      .on_size_change((size, cx) => { if (Math.abs(size.height - S.olView) > 0.5) { S.olView = size.height; cx.notify(); } })
-      .on_scroll_wheel((e, cx) => { cx.stop_propagation(); const y = Math.max(0, Math.min(olMax, S.ol - e.delta.y)); if (y !== S.ol) { S.ol = y; cx.notify(); } })
-      .child(v_flex().flex_none().w_full().mt(-S.ol).py(PAD).px(8).gap(GAP).children(rows));
-  }
-
-  detailView(t, id, full) {
+  detailView(t, id) {
     const tr = T();
     const d = this.details[id];
     const issue = d?.issue ?? this.cache[id];
     if (!issue) return this.empty(t, this.loading.has(`d:${id}`) ? tr.loading : `${id}`);
-    const pr = api.mainPr(issue);
     const hist = { ...tr.hist, priorityName: { 0: tr.noPriority, ...tr.priority } };
-    const author = d ? createdBy(d.issue, d.history) : null;
     const entries = d ? historyEntries(d.issue, d.history, hist) : [];
-    const meta = [
-      issue.createdAt && `${author ? hist.createdBy(author) : hist.createdAt} ${ago(issue.createdAt)}`,
-      issue.assignee && `${tr.assignee} ${issue.assignee.displayName ?? issue.assignee.name}`,
-      issue.project && `${tr.project} ${issue.project.name}`,
-      issue.cycle && `${tr.cycle} ${issue.cycle.name ?? issue.cycle.number}`,
-      issue.dueDate && `${tr.due} ${issue.dueDate}`,
-      `${tr.updated} ${ago(issue.updatedAt)}`,
-    ].filter(Boolean).join("  ·  ");
-
     const rel = d?.relations;
-    const link = this.links?.[issue.identifier];
-    const paneW = full || this.width < WIDE ? this.width : this.width - this.listW;
     const secs = Doc.sections(issue.description ?? "");
     const thr = d ? Doc.threads(d.comments) : null;
-    const tocW = 200;
     const editing = this.issueEdit?.id === id;
-    const showToc = !editing && paneW >= 640 && (secs.some((s) => s.title) || (thr?.length ?? 0) > 0);
-    const maxW = Math.max(160, paneW - 40 - (showToc ? tocW : 0));
+    const narrow = this.width < NARROW;
+    const maxW = Math.max(160, this.width - 40 - (narrow ? 0 : SIDEBAR_W));
     const relRow = (x, n, kind) => h_flex().id(`rel-${kind}-${x.id}-${n}`).h(26).px(8).gap(8).items_center().rounded(6).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-      .on_click((_e, cx) => this.openDetail(x.identifier, cx, !full))
+      .on_click((_e, cx) => this.openDetail(x.identifier, cx, false))
       .when(CLOSED.has(x.state?.type), (el) => el.opacity(0.5))
       .child(svg(stateIcon(x.state)).size(13).flex_none().text_color(x.state?.color ?? t.dim))
       .child(div().w(64).flex_none().text_size(11.5).text_color(t.dim).child(x.identifier))
@@ -2630,71 +2943,34 @@ export default class Linear extends View {
       rel && relGroup(tr.rel.blocking, rel.blocking, "blocking"),
       rel && relGroup(tr.rel.related, rel.related, "related"),
     ].filter(Boolean);
-    const agent = this.agentName();
 
-    const head = () => v_flex().gap(14)
-      .child(h_flex().gap(8).items_center().flex_wrap()
-        .when(full, (el) => el.child(this.button(t, "d-back", tr.back, (cx) => this.back(cx))))
-        .child(div().id("d-ident").text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
-          .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(issue.identifier, "ID", cx)).child(issue.identifier))
-        .child(h_flex().id(`d-state-${id}`).h(22).px(8).gap(6).items_center().rounded(11).border_1().text_size(11.5)
-          .border_color(this.statePick?.id === id ? t.accent : t.border)
-          .when(this.canWrite, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-            .on_click((_e, cx) => (this.statePick?.id === id ? (this.statePick = null, cx.notify()) : this.openStates(id, cx))))
-          .child(svg(stateIcon(issue.state)).size(13).text_color(issue.state?.color ?? t.dim)).child(issue.state?.name ?? "?")
-          .when(this.canWrite, (el) => el.child(div().text_size(10).text_color(t.dim).child("s"))))
-        .child(h_flex().id(`d-assignee-${id}`).h(22).pl(3).pr(8).gap(6).items_center().rounded(11).border_1().text_size(11.5)
-          .border_color(this.assignPick?.id === id ? t.accent : t.border)
-          .when(this.canWrite, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
-            .on_click((_e, cx) => this.openAssign(id, cx)))
-          .child(issue.assignee ? this.avatar(t, issue.assignee.name, 16) : svg(`${ICON}/person.svg`).size(13).text_color(t.dim))
-          .child(div().text_color(issue.assignee ? (this.assignedToMe(issue) ? t.accent : t.foreground) : t.dim)
-            .child(issue.assignee ? issue.assignee.displayName ?? issue.assignee.name : tr.unassigned))
-          .when(this.canWrite, (el) => el.child(div().text_size(10).text_color(t.dim).child("⇧A"))))
-        .when(Boolean(tr.priority[issue.priority]), (el) => el.child(h_flex().gap(5).items_center().text_size(11.5).text_color(issue.priority === 1 ? URGENT : t.muted)
-          .child(this.prioIcon(t, issue.priority)).child(tr.priority[issue.priority])))
-        .child(div().text_size(11.5).text_color(t.dim).child(issue.team?.name ?? "")))
-      .child(editing
-        ? h_flex().id(`e-title-${id}`).h(38).px(10).items_center().rounded(8).border_1().bg(t.background)
-          .border_color(this.editFocus === "title" ? t.accent : t.border).on_mouse_down("left", stop)
-          .child(Input.new(this.titleInput).flex_1().h_full().text_size(17))
-        : TextView.markdown(`d-title-${id}`, `## ${issue.title.replace(/[\\`*_[\]#]/g, "\\$&")}`).selectable())
-      .child(div().text_size(11.5).text_color(t.muted).child(meta))
-      .when(this.statePick?.id === id, (el) => el.child(this.statePicker(t)))
-      .when(this.assignPick?.id === id, (el) => el.child(this.assignPicker(t)))
-      .when(Boolean(issue.labels?.nodes?.length), (el) => el.child(h_flex().gap(6).flex_wrap().items_center()
-        .children(issue.labels.nodes.map((l) => this.chip(t, l.color, l.name)))))
-      .when(Boolean(link), (el) => el.child(h_flex().gap(10).p(10).items_center().rounded(8).bg(t.surface).border_1().border_color(t.border)
-        .child(this.agentBadge(t, link, `db-${id}`, true))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.muted).child(tr.tabIn(link.space.name, link.tab.name)))
-        .child(this.button(t, "d-go", tr.goTab, () => this.goTab(link), true))))
-      .child(h_flex().gap(6).flex_wrap()
-        .child(this.button(t, "d-work", link ? tr.newAgentTab(agent) : tr.workWith(agent), (cx) => this.work(issue, cx), !link))
-        .child(this.button(t, "d-ask", tr.askAgent(agent), (cx) => this.askClaude(issue, cx)))
-        .when(this.canWrite && !editing, (el) => el.child(this.button(t, "d-edit", tr.editIssue, (cx) => this.editIssue(id, cx))))
-        .when(this.canWrite && issue.assignee?.id !== this.viewer?.id, (el) => el.child(this.button(t, "d-assign", tr.assignMe, (cx) => this.assignMe(issue, cx))))
-        .when(!this.canWrite, (el) => el.child(this.button(t, "d-connect", this.connecting ? tr.connecting : tr.connectLinear, (cx) => this.connect(cx))))
-        .child(this.button(t, "d-open", tr.browser, (cx) => this.openUrl(issue.url, cx)))
-        .child(this.button(t, "d-url", tr.copyUrl, (cx) => this.copy(issue.url, "URL", cx)))
-        .child(this.button(t, "d-id", tr.copyId, (cx) => this.copy(issue.identifier, "ID", cx)))
-        .when(Boolean(issue.description?.trim()), (el) => el.child(this.button(t, "d-body-copy", tr.copyBody, (cx) => this.copy(issue.description, tr.bodyWord, cx))))
-        .when(Boolean(pr), (el) => el.child(this.prBadge(t, pr, "d-pr", true))))
-      .when(groups.length > 0, (el) => el.child(v_flex().gap(10).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border).children(groups)));
+    const titleRow = () => h_flex().gap(10).items_center()
+      .child(this.button(t, "d-back", tr.back, (cx) => this.back(cx)))
+      .child(div().id("d-ident").flex_none().text_size(12).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(issue.identifier, "ID", cx)).child(issue.identifier))
+      .child(div().flex_1().min_w(0).child(editing && this.issueEdit.field === "title"
+        ? h_flex().id(`e-title-${id}`).h(38).px(8).items_center().rounded(6).border_1().bg(t.background)
+          .border_color(t.accent).on_mouse_down("left", stop)
+          .child(Input.new(this.titleInput).flex_1().h_full().text_size(17).font_semibold())
+        : this.editable(t, `d-title-wrap-${id}`, id, "title",
+          TextView.markdown(`d-title-${id}`, `## ${issue.title.replace(/[\\`*_[\]#]/g, "\\$&")}`).selectable())));
 
     const divider = (label) => h_flex().gap(10).items_center().pt(6).text_size(11.5).font_semibold().text_color(t.dim)
       .child(div().child(label)).child(div().flex_1().h(1).bg(t.border));
 
-    // The view's items, in order. The outline points at them by key.
-    const items = [{ key: "top", el: () => v_flex().gap(14).child(head()).child(divider(tr.body)) }];
-    if (editing) items.push({ key: "edit", el: () => this.issueEditor(t, id, maxW) });
-    else if (!secs.length) items.push({ key: "nobody", el: () => div().text_size(12).text_color(t.dim).child(tr.noBody) });
-    if (!editing) for (const s of secs) items.push({ key: s.key, el: () => this.markdown(t, `d-body-${id}-${s.key}`, s.text, maxW) });
+    const items = [{ key: "top", el: () => v_flex().gap(14).child(titleRow()).when(narrow, (el) => el.child(this.sidebarView(t, issue, id, true))) }];
+    const bodyEdit = editing && this.issueEdit.field === "body";
+    if (bodyEdit) items.push({ key: "edit", el: () => this.issueEditor(t, id) });
+    else if (!secs.length) items.push({ key: "nobody", el: () => this.editable(t, `d-nobody-${id}`, id, "body",
+      div().py(4).text_size(12.5).text_color(t.dim).child(this.canWrite ? tr.addBody : tr.noBody)) });
+    else for (const s of secs) items.push({ key: s.key, el: () => this.editable(t, `d-bwrap-${id}-${s.key}`, id, "body", this.markdown(t, `d-body-${id}-${s.key}`, s.text, maxW)) });
     if (d) {
       const bar = this.reactionsBar(t, d.issue.reactionData, "issue");
       if (bar) items.push({ key: "ireact", el: () => bar });
     }
+    if (groups.length) items.push({ key: "rels", el: () => v_flex().gap(10).p(10).rounded(8).bg(t.surface).border_1().border_color(t.border).children(groups) });
     if (entries.length) {
-      items.push({ key: "hist", el: () => v_flex().gap(6).child(divider(`${hist.title} ${entries.length}`))
+      items.push({ key: "hist", el: () => v_flex().gap(6).child(divider(`${tr.activity} ${entries.length}`))
         .children(entries.map((x) => h_flex().gap(8).items_start().text_size(12)
           .child(div().w(72).flex_none().text_size(11.5).text_color(t.dim).child(ago(x.at)))
           .child(div().flex_none().font_semibold().child(x.who))
@@ -2709,32 +2985,13 @@ export default class Linear extends View {
       if (d.moreComments) items.push({ key: "cmore", el: () => div().text_size(11.5).text_color(t.dim).child(tr.moreComments) });
     }
 
-    // Where each item is (from the heights measured last frame), which outline item is at the top,
-    // and which are on screen.
     const S = this.scrollOf(id);
     const GAP = 14, PAD = 16;
     let y = PAD;
     for (const i of items) { S.tops[i.key] = y; y += (S.h[i.key] ?? 0) + GAP; }
     S.y = Math.max(0, Math.min(this.maxScroll(S), S.y));
     S.keys = ["top", ...secs.filter((s) => s.title).map((s) => s.key), ...(thr ? ["cmts", ...thr.map((x) => `c:${x.comment.id}`)] : [])];
-    const reach = S.y + 24;
-    S.active = S.keys.reduce((a, k) => ((S.tops[k] ?? Infinity) <= reach ? k : a), "top");
-    // At the very bottom the last items can't reach the top; mark the last one that's on screen.
-    const onScreen = new Set();
-    const order = items.map((i) => i.key);
-    for (let n = 0; n < order.length; n++) {
-      const top = S.tops[order[n]], bottom = top + (S.h[order[n]] ?? 0);
-      if (bottom >= S.y && top <= S.y + S.view) onScreen.add(order[n]);
-    }
-    // Items between two outline keys belong to the one before (a section's text to its heading).
-    const owner = {};
-    let cur = "top";
-    for (const k of order) { if (S.keys.includes(k)) cur = k; owner[k] = cur; }
-    const seen = new Set([...onScreen].map((k) => owner[k]));
-    if (S.view > 0 && S.y >= this.maxScroll(S) - 2 && S.y > 0) {
-      const last = S.keys.filter((k) => seen.has(k)).pop();
-      if (last) S.active = last;
-    }
+    S.active = S.keys.reduce((a, k) => ((S.tops[k] ?? Infinity) <= S.y + 24 ? k : a), "top");
 
     const thumb = S.content > S.view && S.view > 0
       ? (() => {
@@ -2752,26 +3009,108 @@ export default class Linear extends View {
           .on_size_change((size, cx) => { if (this.measured(S.h, i.key, size.height)) cx.notify(); })
           .child(i.el()))))
       .when(Boolean(thumb), (el) => el.child(thumb));
-    return v_flex().flex_1().w_full().min_h(0).on_mouse_down("left", (_e, cx) => { this.hold(cx); cx.stop_propagation(); })
+    return v_flex().flex_1().w_full().min_h(0)
+      .on_mouse_down("left", (_e, cx) => { this.hold(cx); if (this.actionsOpen) { this.actionsOpen = false; cx.notify(); } cx.stop_propagation(); })
       .child(h_flex().flex_1().w_full().min_h(0).items_start()
         .child(page)
-        .when(showToc, (el) => el.child(this.outlineView(t, id, secs, thr, S, seen, tocW))))
+        .when(!narrow, (el) => el.child(this.sidebarView(t, issue, id, false))))
       .child(this.canWrite ? this.composerBar(t, issue, id) : this.commentBar(t, issue));
   }
 
-  issueEditor(t, id, maxW) {
-    const tr = T(), changed = this.issueEdited();
-    return v_flex().gap(10).w_full()
-      .child(div().id(`e-body-${id}`).w_full().min_w(0).rounded(8).border_1().bg(t.background)
-        .border_color(this.editFocus === "body" ? t.accent : t.border).on_mouse_down("left", stop)
-        .child(Textarea.new(this.bodyDraft).w_full()))
-      .child(h_flex().gap(8).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child(tr.editHint))
-        .child(this.button(t, "e-cancel", tr.cancel, (cx) => this.cancelEdit(cx)))
-        .child(this.button(t, "e-save", this.sending ? tr.saving : tr.save, (cx) => this.saveIssue(cx), changed && !this.sending)))
-      .child(div().pt(4).text_size(11).font_semibold().text_color(t.dim).child(tr.preview))
-      .child(v_flex().w_full().p(12).rounded(8).border_1().border_color(t.border)
-        .child(this.markdown(t, `e-prev-${id}`, this.bodyDraft.value().trim() || `_${tr.noBody}_`, maxW - 26)));
+  sidebarView(t, issue, id, inline) {
+    const tr = T();
+    const d = this.details[id];
+    const pr = api.mainPr(issue);
+    const link = this.links?.[issue.identifier];
+    const author = d ? createdBy(d.issue, d.history) : null;
+    const title = (text) => div().text_size(11).font_semibold().text_color(t.dim).child(text);
+    const prop = (key, label, value, action) => h_flex().id(`sp-${key}`).h(28).px(6).gap(8).items_center().rounded(6)
+      .when(Boolean(action), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => action(cx)))
+      .child(div().w(76).flex_none().text_size(11.5).text_color(t.dim).child(label))
+      .child(h_flex().flex_1().min_w(0).gap(6).items_center().text_size(12).child(value));
+    const text = (s, dim = false) => div().min_w(0).truncate().text_color(dim ? t.dim : t.foreground).child(s);
+    const write = (fn) => (this.canWrite ? fn : null);
+    const who = issue.assignee?.displayName ?? issue.assignee?.name;
+    const cycle = issue.cycle && (this.teamCycles[issue.team?.id] ?? []).find((c) => c.id === issue.cycle.id);
+    const picking = (kind) => this.propPick?.id === id && this.propPick.kind === kind && this.propPicker(t);
+    // A section title that opens its picker, like Linear's.
+    const editTitle = (key, text, kind) => h_flex().id(`sp-t-${key}`).h(22).px(6).gap(6).items_center().rounded(6)
+      .when(this.canWrite, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop).on_click((_e, cx) => this.openProp(id, kind, cx)))
+      .child(div().flex_1().child(title(text)))
+      .when(this.canWrite, (el) => el.child(div().text_size(13).text_color(t.dim).child("+")));
+    const facts = [
+      prop("state", tr.statusLabel, h_flex().gap(6).items_center().child(svg(stateIcon(issue.state)).size(13).text_color(issue.state?.color ?? t.dim)).child(text(issue.state?.name ?? "?")),
+        write((cx) => (this.statePick?.id === id ? (this.statePick = null, cx.notify()) : this.openStates(id, cx)))),
+      this.statePick?.id === id && this.statePicker(t),
+      prop("assignee", tr.assignee, h_flex().gap(6).items_center()
+        .child(issue.assignee ? this.avatar(t, issue.assignee.name, 16) : svg(`${ICON}/person.svg`).size(13).text_color(t.dim))
+        .child(div().min_w(0).truncate().text_color(issue.assignee ? (this.assignedToMe(issue) ? t.accent : t.foreground) : t.dim).child(who ?? tr.unassigned)),
+        write((cx) => this.openAssign(id, cx))),
+      this.assignPick?.id === id && this.assignPicker(t),
+      prop("prio", tr.priorityLabel, tr.priority[issue.priority]
+        ? h_flex().gap(6).items_center().text_color(issue.priority === 1 ? URGENT : t.foreground).child(this.prioIcon(t, issue.priority)).child(tr.priority[issue.priority])
+        : h_flex().gap(6).items_center().child(this.prioIcon(t, 0)).child(text(tr.noPriority, true)),
+        write((cx) => this.openProp(id, "priority", cx))),
+      picking("priority"),
+      issue.team && prop("team", tr.teamLabel, text(issue.team.name)),
+      prop("cycle", tr.cycle, issue.cycle ? text(cycle ? cycleName(cycle, tr) : "…") : text(tr.noCycle, true),
+        write((cx) => this.openProp(id, "cycle", cx))),
+      picking("cycle"),
+      prop("due", tr.due, issue.dueDate ? text(issue.dueDate) : text(tr.noDue, true), write((cx) => this.openProp(id, "due", cx))),
+      picking("due"),
+      issue.createdAt && prop("created", tr.createdLabel, text(author ? `${ago(issue.createdAt)} · ${author}` : ago(issue.createdAt))),
+      issue.updatedAt && prop("updated", tr.updated, text(ago(issue.updatedAt))),
+    ].filter(Boolean);
+    const labels = issue.labels?.nodes ?? [];
+    // Every control here has the same look and height.
+    const H = 28;
+    const btn = (bid, label, action) => this.button(t, bid, label, action).h(H).flex_none();
+    const actions = v_flex().gap(8)
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .child(btn("d-open", tr.openInLinear, (cx) => this.openUrl(issue.url, cx)))
+        .child(btn("d-actions", `${tr.actions}  ▾`, (cx) => { this.actionsOpen = !this.actionsOpen; cx.notify(); })))
+      .when(this.actionsOpen, (el) => el.child(v_flex().id("d-actions-menu").p(4).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+        .child(this.menuRow(t, "d-act-worktree", false, (cx) => { this.actionsOpen = false; this.openStart(issue, cx); })
+          .child(div().flex_1().child(tr.startWorktree)))))
+      // The agent: one wide button (status, then where it runs) that goes to its tab; its branch below.
+      .when(Boolean(link), (el) => el.child(v_flex().gap(6)
+        .child(this.agentBadge(t, link, `db-${id}`, true).flex_1().w_full().h(36).px(10).gap(7).text_size(13).bg(t.raised)
+          .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(tr.tabIn(link.space.name, link.tab.name))))
+        .when(Boolean(link.branch), (el) => el.child(h_flex().px(2).gap(6).items_center().text_size(11.5).text_color(t.muted)
+          .child(svg(`${ICON}/branch.svg`).size(13).flex_none().text_color(t.dim))
+          .child(div().min_w(0).truncate().child(link.branch))))))
+      .when(Boolean(pr), (el) => el.child(h_flex().pt(10).child(this.prBadge(t, pr, "d-pr", true).h(H))))
+      .when(!this.canWrite, (el) => el.child(h_flex().child(btn("d-connect", this.connecting ? tr.connecting : tr.connectLinear, (cx) => this.connect(cx)))));
+    const body = v_flex().gap(16).w_full()
+      .child(actions)
+      .child(v_flex().gap(4).child(title(tr.properties)).children(facts))
+      .child(v_flex().gap(6).child(editTitle("labels", tr.labelsTitle, "labels"))
+        .child(div().px(6).child(labels.length
+          ? h_flex().gap(6).flex_wrap().items_center().children(labels.map((l) => this.chip(t, l.color, l.name)))
+          : div().text_size(12).text_color(t.dim).child(tr.noLabels)))
+        .when(Boolean(picking("labels")), (el) => el.child(picking("labels"))))
+      .child(v_flex().gap(6).child(editTitle("project", tr.projectTitle, "project"))
+        .child(div().px(6).text_size(12).text_color(issue.project ? t.foreground : t.dim).child(issue.project?.name ?? tr.noProject))
+        .when(Boolean(picking("project")), (el) => el.child(picking("project"))));
+    if (inline) return body.p(12).rounded(8).border_1().border_color(t.border);
+    return v_flex().id(`d-side-${id}`).w(SIDEBAR_W).flex_none().h_full().min_h(0).overflow_y_scrollbar().p(16).border_l(1).border_color(t.border)
+      .child(body);
+  }
+
+  issueEditor(t, id) {
+    const tr = T();
+    return v_flex().gap(4).w_full()
+      .child(div().id(`e-body-${id}`).w_full().min_w(0).rounded(6).border_1().bg(t.background).border_color(t.accent)
+        .on_mouse_down("left", stop).child(Textarea.new(this.bodyDraft).w_full()))
+      .child(div().text_size(11).text_color(t.dim).child(this.issueEdit?.saving ? tr.saving : tr.editHint));
+  }
+
+  // Click to edit the title or the description. A link or an image in it keeps its own click.
+  editable(t, key, id, field, el) {
+    if (!this.canWrite) return el;
+    return div().id(key).w_full().min_w(0).cursor_text()
+      .on_click((_e, cx) => cx.timer.after(0, (cx) => { if (Date.now() - (this.linkAt ?? 0) > 400) this.editIssue(id, cx, field); }))
+      .child(el);
   }
 
   assignPicker(t) {
@@ -2790,6 +3129,26 @@ export default class Linear extends View {
       }))
       .when(list.length === 0, (el) => el.child(div().px(8).py(4).text_size(12).text_color(t.dim).child(tr.nobody)))
       .child(div().px(8).pt(4).text_size(11).text_color(t.dim).child(tr.assignHint));
+  }
+
+  propPicker(t) {
+    const tr = T(), p = this.propPick, list = this.propChoices(), sel = Math.min(p.sel, list.length - 1);
+    const multi = p.kind === "labels";
+    const hint = p.kind === "due" ? tr.dueHint : multi ? tr.labelsHint : tr.pickHint;
+    return v_flex().gap(1).p(6).w(320).max_w_full().rounded(8).border_1().border_color(t.border).bg(t.surface)
+      .child(h_flex().h(30).px(8).mb(2).gap(6).items_center().rounded(6).border_1().border_color(t.accent).bg(t.background)
+        .child(svg(`${ICON}/search.svg`).size(12).text_color(t.dim))
+        .child(Input.new(this.propInput).flex_1().h_full().text_size(12.5)))
+      .when(p.items === null, (el) => el.child(div().px(8).py(4).text_size(12).text_color(t.dim).child(tr.loading)))
+      .children(list.map((row, n) => this.menuRow(t, `pp-${p.kind}-${row.key}`, n === sel, (cx) => this.pickProp(row, cx))
+        .when(multi, (el) => el.child(h_flex().size(14).flex_none().rounded(3).border_1().border_color(row.on ? t.accent : t.border)
+          .when(row.on, (el) => el.bg(t.accent).text_size(10).text_color(t.solid_foreground).items_center().justify_center().child("✓"))))
+        .when(p.kind === "priority", (el) => el.child(this.prioIcon(t, row.prio)))
+        .when(Boolean(row.color) && p.kind !== "priority", (el) => el.child(div().size(8).flex_none().rounded(4).bg(row.color)))
+        .child(div().flex_1().min_w(0).truncate().text_color(row.none ? t.muted : t.foreground).child(row.label))
+        .when(Boolean(row.on) && !multi, (el) => el.child(div().flex_none().text_size(11).text_color(t.accent).child("✓")))))
+      .when(p.items !== null && list.length === 0, (el) => el.child(div().px(8).py(4).text_size(12).text_color(t.dim).child(p.kind === "due" ? tr.dueBad : tr.nothing)))
+      .child(div().px(8).pt(4).text_size(11).text_color(t.dim).child(hint));
   }
 
   statePicker(t) {
@@ -2847,10 +3206,14 @@ export default class Linear extends View {
 
   footer(t) {
     const s = this.flash ?? this.status;
-    const hint = this.editFocus ? T().editHint : this.composing ? T().commentHint(this.agentName()) : this.mode === "detail" ? (this.canWrite ? T().hintDetailWrite : T().hintDetail)(this.agentName()) : this.typing ? T().hintSearch : this.layout === "board" ? T().hintBoard : T().hintList;
     return h_flex().h(26).flex_none().px(12).gap(10).items_center().border_t(1).border_color(t.border).text_size(11)
-      .child(div().flex_1().min_w(0).truncate().text_color(s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim).child(s?.text ?? hint))
-      .child(div().flex_none().text_color(t.dim).child(this.viewer ? `${this.viewer.displayName ?? this.viewer.name} · ${T().teams} ${(this.viewer.teams?.nodes ?? []).map((x) => x.key).join(" ")}` : ""));
+      .child(div().flex_1().min_w(0).truncate().text_color(s ? (s.level === "error" ? t.blocked : s.level === "success" ? t.done : t.muted) : t.dim).child(s?.text ?? ""))
+      .when(s?.kind === "auth", (el) => el.child(this.button(t, "f-connect", this.connecting ? T().connecting : T().connectLinear, (cx) => this.connect(cx), true).h(20).px(8).text_size(11)))
+      .when(s?.level === "error" && this.errors.length > 0, (el) => el.child(this.button(t, "f-copy-error", T().copyError,
+        (cx) => { cx.write_to_clipboard(this.errorReport()); this.say(T().errorCopied, cx, "success"); }).h(20).px(8).text_size(11)))
+      .child(div().flex_none().text_color(t.dim).child(this.viewer ? `${this.viewer.displayName ?? this.viewer.name} · ${T().teams} ${(this.viewer.teams?.nodes ?? []).map((x) => x.key).join(" ")}` : ""))
+      .child(div().id("shortcuts-hint").px(6).rounded(4).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { this.shortcuts = !this.shortcuts; cx.notify(); }).child(T().shortcutsHint));
   }
 
   pickView(t) {

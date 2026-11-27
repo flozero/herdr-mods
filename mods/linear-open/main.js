@@ -16,6 +16,7 @@ export default class LinearOpen extends View {
       if (tab) {
         run("space.select", { id: s.id });
         run("tab.select", { id: tab.id });
+        run("linear.home");
         return;
       }
     }

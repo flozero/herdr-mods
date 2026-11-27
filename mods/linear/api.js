@@ -20,7 +20,7 @@ export function setRunner(fn) {
 
 export function errorKind(message) {
   const m = String(message ?? "");
-  if (/not connected|session expired|refused the session|linear-me login|HTTP 401|unauthori[sz]ed/i.test(m)) return "auth";
+  if (/not connected|session expired|refused the session|linear-me login|HTTP 401|unauthori[sz]ed|invalid_grant|invalid refresh token/i.test(m)) return "auth";
   if (/rate ?limit|HTTP 429/i.test(m)) return "ratelimit";
   if (/could not find|not found/i.test(m)) return "notfound";
   if (/fetch failed|ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|network|timed? ?out/i.test(m)) return "network";
@@ -283,6 +283,36 @@ export async function project(slug) {
   }
 }
 
+export function viewItem(v) {
+  if (v?.kind === "view") return v;
+  return { id: v.id, slugId: v.slugId ?? null, name: v.name ?? "", color: v.color ?? null, kind: "view", shared: v.shared ?? true, modelName: "Issue",
+    team: v.team ? { id: v.team.id ?? null, key: v.team.key ?? null, name: v.team.name ?? null } : null, url: v.url ?? null };
+}
+
+export async function customViews() {
+  const out = [];
+  let cursor = null;
+  for (let n = 0; n < 4; n++) {
+    const v = await one("list_custom_views", { type: "Issue", limit: 250, ...(cursor ? { cursor } : {}) });
+    out.push(...(v?.customViews ?? []).filter((x) => x?.id && (x.modelName ?? "Issue") === "Issue").map(viewItem));
+    if (!v?.hasNextPage || !v.cursor) break;
+    cursor = v.cursor;
+  }
+  return out;
+}
+
+export function projectOf(p) {
+  if (p?.kind === "project") return p;
+  return { id: p.uuid ?? p.id, slugId: p.slugId ?? null, name: p.name ?? "", color: p.color ?? null, kind: "project", shared: true, team: null, modelName: "Issue",
+    status: p.status ? { name: p.status.name, type: p.status.type } : null, teams: (p.teams ?? []).map((t) => t.key).filter(Boolean), url: p.url ?? null };
+}
+
+export async function projects(query, after = null) {
+  const v = await one("list_projects", { limit: PAGE_SIZE, orderBy: "updatedAt", ...(query ? { query } : {}), ...(after ? { cursor: after } : {}),
+    fields: ["id", "uuid", "name", "status", "teams", "url", "updatedAt"] });
+  return { nodes: (v?.projects ?? []).filter((p) => p?.id).map(projectOf), cursor: v?.cursor ?? null, more: Boolean(v?.hasNextPage) };
+}
+
 export function overviewOf(p, updates, comments) {
   if (!p) return null;
   const nodes = (list) => ({ nodes: list ?? [] });
@@ -320,4 +350,27 @@ export async function projectIssues(id, after = null) {
 
 export async function viewIssues(viewId, after = null) {
   return pageOf(await one("list_issues", { customView: viewId, limit: PAGE_SIZE, ...(after ? { cursor: after } : {}) }));
+}
+
+// A team's labels that can go on an issue (no groups, nothing retired or archived).
+export function labelsOf(v) {
+  return (v?.labels ?? []).filter((l) => l?.id && !l.isGroup && !l.retiredAt && !l.archivedAt)
+    .map((l) => ({ id: l.id, name: l.name ?? "", color: l.color ?? null, group: l.parent ?? null }))
+    .sort((a, b) => String(a.group ?? "").localeCompare(String(b.group ?? "")) || a.name.localeCompare(b.name));
+}
+
+export async function teamLabels(teamId) {
+  return labelsOf(await one("list_issue_labels", { team: teamId, limit: 250 }));
+}
+
+// The cycles still to come or running, soonest first.
+export function cyclesOf(v, now = Date.now()) {
+  const list = Array.isArray(v) ? v : v?.cycles ?? [];
+  return list.filter((c) => c?.id && (c.isCurrent || !c.endsAt || Date.parse(c.endsAt) >= now))
+    .map((c) => ({ id: c.id, number: c.number ?? null, name: c.title || c.name || null, startsAt: c.startsAt ?? null, endsAt: c.endsAt ?? null, current: Boolean(c.isCurrent) }))
+    .sort((a, b) => String(a.startsAt ?? "").localeCompare(String(b.startsAt ?? "")));
+}
+
+export async function teamCycles(teamId) {
+  return cyclesOf(await one("list_cycles", { teamId }));
 }

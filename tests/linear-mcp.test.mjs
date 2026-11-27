@@ -100,6 +100,8 @@ test("a missing issue is null, a lost session is an auth error", async () => {
   await assert.rejects(api.issueDetail("ENG-42"), (e) => e.kind === "auth");
   api.setRunner(async () => { throw new Error("not connected: run linear-me login"); });
   await assert.rejects(api.people(), (e) => e.kind === "auth");
+  api.setRunner(async () => { throw new Error('https://mcp.linear.app/token: HTTP 400 {"error":"invalid_grant","error_description":"Invalid refresh token"}'); });
+  await assert.rejects(api.people(), (e) => e.kind === "auth");
 });
 
 test("states come in Linear's order, with a color per type", async () => {
@@ -153,4 +155,17 @@ test("linear-me batch runs read-only tools only, and keeps going past a failed c
     return { structuredContent: { teams: [] } };
   });
   assert.deepEqual(out, [{ ok: true, value: { teams: [] } }, { ok: false, error: "Could not find referenced Issue." }]);
+});
+
+test("projects are listed by name, a page at a time, keyed by their uuid", async () => {
+  const seen = fake({ list_projects: { ok: true, value: { projects: [
+    { id: "P-ENG-1", uuid: "uuid-1", name: "Widgets", status: { id: "s", name: "Started", type: "started" }, teams: [{ id: "t-1", key: "ENG", name: "Engine" }], url: "https://linear.app/x/project/widgets" },
+  ], hasNextPage: true, cursor: "uuid-1" } } });
+  const page = await api.projects("wid", "c-0");
+  assert.equal(seen[0].args.query, "wid");
+  assert.equal(seen[0].args.cursor, "c-0");
+  assert.deepEqual(page.nodes.map((p) => [p.id, p.name, p.kind, p.teams, p.status.name]), [["uuid-1", "Widgets", "project", ["ENG"], "Started"]]);
+  assert.equal(page.more, true);
+  assert.equal(page.cursor, "uuid-1");
+  assert.equal(api.projectOf(page.nodes[0]), page.nodes[0]);
 });

@@ -106,7 +106,9 @@ async function accessToken() {
   if (!t?.access_token) throw new Error("not connected: run linear-me login");
   if (t.expires_at - 60000 > Date.now()) return t.access_token;
   if (!t.refresh_token) throw new Error("session expired: run linear-me login");
-  const fresh = { ...t, ...tokens(await postForm(`${BASE}/token`, { grant_type: "refresh_token", refresh_token: t.refresh_token, client_id: t.client_id }), t) };
+  const refreshed = await postForm(`${BASE}/token`, { grant_type: "refresh_token", refresh_token: t.refresh_token, client_id: t.client_id })
+    .catch((e) => { throw /invalid_grant/.test(e.message) ? new Error("session expired: run linear-me login") : e; });
+  const fresh = { ...t, ...tokens(refreshed, t) };
   await save(fresh);
   return fresh.access_token;
 }
