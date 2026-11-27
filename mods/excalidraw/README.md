@@ -12,7 +12,7 @@ Add the MCP server to your agent, for Claude:
 claude mcp add -s user excalidraw -- node ~/.config/herdr-app/mods/excalidraw/mcp/server.mjs
 ```
 
-It runs over stdio (no network port) and has six tools: `open_canvas`, `read_canvas`, `draw`, `update_shape`, `delete_shapes`, `clear_canvas`.
+It runs over stdio (no network port) and has seven tools: `open_canvas`, `read_canvas`, `draw`, `update_shape`, `delete_shapes`, `clear_canvas`, and `export_png`, which saves the drawing as a PNG (plain strokes, through `rsvg-convert` from `brew install librsvg`) for a merge request.
 
 ## Keys
 

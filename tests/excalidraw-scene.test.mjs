@@ -62,3 +62,19 @@ test("paths are drawn at the canvas zoom only: Herdr zooms a path's lengths itse
     assert.doesNotMatch(body(fn), /this\.scale\(\)/, `${fn} does not use the pointer scale for paths`);
   }
 });
+
+test("export: the shapes, arrows and labels as SVG, a label on an arrow over a plate", async () => {
+  const { toSvg } = await import("../mods/excalidraw/mcp/svg.mjs");
+  const S = await import("../mods/excalidraw/mcp/scene.mjs");
+  const doc = S.blankDocument();
+  const r = S.draw([], [{ type: "rectangle", id: "a", x: 0, y: 0, text: "A <b>" }, { type: "diamond", id: "b", x: 300, y: 0, text: "B" },
+    { type: "arrow", from: "a", to: "b", text: "yes", dashed: true }]);
+  doc.elements = r.elements ?? r;
+  const svg = toSvg(doc);
+  assert.match(svg, /<rect [^>]*rx=/);
+  assert.match(svg, /<polygon /);
+  assert.match(svg, /stroke-dasharray/);
+  assert.match(svg, /A &lt;b&gt;/);
+  assert.equal((svg.match(/<polyline /g) ?? []).length, 2);
+  assert.ok(svg.indexOf('fill="#ffffff"/><text') > 0);
+});

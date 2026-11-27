@@ -6,6 +6,7 @@ import readline from "node:readline";
 import { execFile } from "node:child_process";
 import { blankDocument, draw, update, remove, clear, summarize, changes } from "./scene.mjs";
 import { projectOf, drawingPath } from "./where.mjs";
+import { toSvg } from "./svg.mjs";
 
 const INSTRUCTIONS = `A live Excalidraw canvas in Herdr, beside this terminal. open_canvas first: it shows the drawing next to you and the person sees every change as you make it. A named drawing is kept in ~/.herdr/drawings/<project>/, the project being this repository (its worktrees share it) or the current folder.
 Coordinates are pixels, x to the right and y down. Shapes default to 160x80; leave about 80px between shapes and lay them out on a grid.
@@ -55,6 +56,11 @@ const TOOLS = [
     inputSchema: { type: "object", properties: { ids: { type: "array", items: { type: "string" } } }, required: ["ids"] } },
   { name: "clear_canvas", description: "Delete everything on the canvas (undo in the canvas brings it back).",
     inputSchema: { type: "object", properties: {} } },
+  { name: "export_png", description: "Save the open drawing as a PNG (plain strokes, not hand-drawn) next to its .excalidraw file, or at `path`. Answers the PNG's path: Read it to look at it, attach it to a merge request.",
+    inputSchema: { type: "object", properties: {
+      path: { type: "string", description: "Where to write the PNG (absolute, or relative to the working directory); default: the drawing's path with .png" },
+      scale: { type: "number", description: "Pixel density, default 2" },
+    } } },
 ];
 
 const run = (cmd, args) => new Promise((resolve, reject) => {
@@ -105,6 +111,17 @@ async function openCanvas(args) {
   return `${already ? "Already open" : "Opened"} beside you: ${file}`;
 }
 
+async function exportPng({ path: p, scale = 2 } = {}) {
+  if (!current) throw new Error("open_canvas first");
+  const out = p ? path.resolve(String(p).replace(/^~(?=\/|$)/, os.homedir())) : current.replace(/\.excalidraw$/, ".png");
+  const svg = out.replace(/\.png$/i, "") + ".svg";
+  await fs.mkdir(path.dirname(out), { recursive: true });
+  await fs.writeFile(svg, toSvg(await readDoc(current)));
+  try { await run("rsvg-convert", ["--zoom", String(scale), "--format", "png", "--output", out, svg]); }
+  catch (e) { throw new Error(`rsvg-convert failed (brew install librsvg): ${e.message}. The SVG is at ${svg}`); }
+  return `Saved ${out} (and ${svg})`;
+}
+
 async function change(fn) {
   if (!current) throw new Error("open_canvas first");
   const doc = await readDoc(current);
@@ -128,6 +145,7 @@ async function call(name, args = {}) {
   if (name === "update_shape") { const { id, ...patch } = args; await change((els) => update(els, id, patch)); return `Updated ${id}`; }
   if (name === "delete_shapes") { await change((els) => remove(els, args.ids ?? [])); return `Deleted ${(args.ids ?? []).join(", ")}`; }
   if (name === "clear_canvas") { await change((els) => clear(els)); return "Cleared"; }
+  if (name === "export_png") return exportPng(args);
   throw new Error(`unknown tool ${name}`);
 }
 
