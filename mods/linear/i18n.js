@@ -89,6 +89,8 @@ const en = {
   connectLinear: "Connect Linear", connecting: "Waiting for Linear in your browser…",
   connected: "Linear connected", connectFailed: "Couldn't connect Linear",
   connectFirst: "Connect Linear first (the Connect Linear button) to write", saving: "Saving…", writeFailed: "Linear refused",
+  savingN: (n) => (n > 1 ? `Saving ${n}…` : "Saving…"), sendingComment: "Sending…",
+  saveFailed: (what) => `Not saved · ${what}`, saveFailedMore: (n) => `+${n} more`, saveBack: (id) => `Go back to ${id}`, saveRetry: "Retry",
   commentPrompt: "Leave a comment…", newComment: "New comment", replyTo: (who) => `↳ Reply to ${who}`, editing: "Editing your comment",
   reply: "Reply", edit: "Edit", cancel: "Cancel", save: "Save  ⌘↵", commentSend: "Comment  ⌘↵", commentEmpty: "The comment is empty",
   commentSent: (id) => `Commented on ${id}`, commentEdited: "Comment updated",
@@ -209,6 +211,8 @@ const ko = {
     archived: "보관함", trashed: "삭제함", someone: "누군가",
   },
   refreshed: "새로고침했어요",
+  savingN: (n) => (n > 1 ? `저장 중 ${n}…` : "저장 중…"), sendingComment: "보내는 중…",
+  saveFailed: (what) => `저장 안 됨 · ${what}`, saveFailedMore: (n) => `+${n}개 더`, saveBack: (id) => `${id}로 돌아가기`, saveRetry: "다시 시도",
   err: {
     auth: "Linear에 연결되지 않았어요. Connect Linear를 누르세요",
     ratelimit: "Linear API 한도를 넘었어요. 잠시 뒤 다시 시도해요",

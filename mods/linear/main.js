@@ -133,6 +133,12 @@ export default class Linear extends View {
     this.canWrite = false;
     this.connecting = false;
     this.sending = false;
+    this.pending = new Map();
+    this.pendingComments = new Map();
+    this.inflight = new Map();
+    this.saveSeq = 0; this.saveCount = 0;
+    this.saveChain = Promise.resolve();
+    this.saveErrors = [];
     this.statePick = null;
     this.draftFor = null;
     this.draftMode = { mode: "new" };
@@ -324,7 +330,7 @@ export default class Linear extends View {
 
   remember(list) {
     this.dataVer++;
-    for (const i of list) if (i?.identifier) this.cache[i.identifier] = slim(this.filled(i));
+    for (const i of list) if (i?.identifier) this.cache[i.identifier] = slim(this.filled(this.overlay(i)));
     const ids = Object.keys(this.cache);
     if (ids.length > CACHE_MAX) {
       const keep = new Set([...this.recent, ...this.mine.map((i) => i.identifier)]);
@@ -451,6 +457,118 @@ export default class Linear extends View {
     }
   }
 
+  mutate(cx, job) {
+    if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
+    const { id, fields } = job;
+    const seq = ++this.saveSeq;
+    let before = null;
+    if (fields) {
+      const base = this.details[id]?.issue ?? this.cache[id] ?? {};
+      before = Object.fromEntries(Object.keys(fields).map((k) => [k, base[k] ?? null]));
+      if (!this.pending.has(id)) this.pending.set(id, new Map());
+      this.pending.get(id).set(seq, fields);
+      this.patchIssue(id, fields);
+    }
+    job.local?.apply();
+    const run = { ...job, where: job.where ?? { mode: this.mode, tab: this.tab, stack: [...this.stack] } };
+    this.saveCount++;
+    this.inflight.set(id, (this.inflight.get(id) ?? 0) + 1);
+    cx.notify();
+    cx.spawn((cx) => (this.saveChain = this.saveChain.then(() => this.runSave(cx, run, seq, before)).catch(() => {})));
+  }
+
+  async runSave(cx, job, seq, before) {
+    const { id } = job;
+    let value, error = null;
+    try { value = await this.linearMe(job.tool ?? "save_issue", job.args); }
+    catch (e) { error = e; }
+    this.saveCount--;
+    const left = (this.inflight.get(id) ?? 1) - 1;
+    if (left > 0) this.inflight.set(id, left); else this.inflight.delete(id);
+    const p = this.pending.get(id);
+    p?.delete(seq);
+    if (p && !p.size) this.pending.delete(id);
+    if (error) {
+      if (before) this.patchIssue(id, before);
+      const rest = this.pending.get(id);
+      if (rest) this.patchIssue(id, Object.assign({}, ...rest.values()));
+      job.local?.undo();
+      this.failSave(job, error, cx);
+    } else {
+      job.local?.done?.();
+      this.say(typeof job.done === "function" ? job.done(value) : job.done, cx, "success");
+    }
+    cx.notify();
+    if (!this.inflight.has(id)) await this.loadDetail(cx, id, true);
+    if (!this.saveCount && !error) this.refresh(cx, false);
+  }
+
+  failSave(job, e, cx) {
+    const message = String(e?.message ?? e);
+    const kind = api.errorKind(message);
+    this.logError(`save ${job.id}`, e);
+    if (kind === "auth") this.canWrite = false;
+    this.saveErrors = [...this.saveErrors.slice(-9), { id: job.id, what: job.what ?? job.done, message, kind, job }];
+    cx.notify();
+  }
+
+  overlay(issue) {
+    const p = issue?.identifier && this.pending.get(issue.identifier);
+    return p?.size ? Object.assign({ ...issue }, ...p.values()) : issue;
+  }
+
+  patchIssue(id, fields) {
+    const fix = (i) => (i?.identifier === id ? { ...i, ...fields } : i);
+    const d = this.details[id];
+    if (d) this.details[id] = { ...d, issue: fix(d.issue) };
+    if (this.cache[id]) this.cache[id] = fix(this.cache[id]);
+    if (this.mine.some((i) => i.identifier === id)) this.mine = this.mine.map(fix);
+    let views = null;
+    for (const [k, v] of Object.entries(this.viewData)) {
+      if (v.nodes?.some((i) => i.identifier === id)) (views ??= { ...this.viewData })[k] = { ...v, nodes: v.nodes.map(fix) };
+    }
+    if (views) this.viewData = views;
+    this.dataVer++;
+  }
+
+  withPending(id, d) {
+    const list = this.pendingComments.get(id);
+    if (!d || !list?.length) return d;
+    const comments = d.comments.map((c) => {
+      const e = list.findLast((x) => x.editId === c.id);
+      return e ? { ...c, body: e.body, pending: true } : c;
+    });
+    return { ...d, comments: [...comments, ...list.filter((x) => !x.editId).map((x) => x.comment)] };
+  }
+
+  saveBack(err, cx) {
+    const w = err.job.where ?? {};
+    if (w.tab && w.tab !== this.tab) this.setTab(w.tab, cx);
+    this.stack = w.mode === "detail" && w.stack?.length ? [...w.stack] : [err.id];
+    if (this.stack[this.stack.length - 1] !== err.id) this.stack.push(err.id);
+    this.mode = "detail";
+    this.pick = null; this.pop = null; this.creating = null; this.actionsOpen = false;
+    this.focusList();
+    cx.spawn(async (cx) => this.loadDetail(cx, err.id, true));
+    if (err.job.restore) { this.dropSaveError(err, cx); err.job.restore(cx); }
+    cx.notify();
+  }
+
+  retrySave(err, cx) {
+    this.dropSaveError(err, cx);
+    this.mutate(cx, err.job);
+  }
+
+  dropSaveError(err, cx) {
+    this.saveErrors = this.saveErrors.filter((x) => x !== err);
+    cx.notify();
+  }
+
+  me() {
+    const v = this.viewer;
+    return v ? { id: v.id, name: v.name, displayName: v.displayName ?? v.name } : null;
+  }
+
   openComposer(id, cx, mode = { mode: "new" }) {
     if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
     if (this.draftFor !== id || JSON.stringify(this.draftMode) !== JSON.stringify(mode)) {
@@ -574,37 +692,61 @@ export default class Linear extends View {
 
   sendComment(cx) {
     const id = this.draftFor, m = this.draftMode, body = this.draft.value().trim();
-    if (!id || this.sending) return;
+    if (!id) return;
     if (!body) { this.say(T().commentEmpty, cx); return; }
+    if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
+    const tr = T();
     const args = m.mode === "edit" ? { id: m.commentId, body } : { issueId: id, body, ...(m.mode === "reply" ? { parentId: m.parentId } : {}) };
-    cx.spawn(async (cx) => {
-      if (!(await this.write("save_comment", args, m.mode === "edit" ? T().commentEdited : T().commentSent(id), cx))) return;
-      this.draftText = "";
-      this.draft.set_value("");
-      this.draftFor = null; this.draftMode = { mode: "new" };
-      this.focusList();
-      await this.loadDetail(cx, id, true);
-      if (m.mode === "new") this.jump(id, "end", cx);
-      cx.notify();
+    const entry = m.mode === "edit" ? { editId: m.commentId, body } : {
+      comment: { id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`, body, createdAt: new Date().toISOString(), editedAt: null,
+        parent: m.mode === "reply" ? { id: m.parentId } : null, reactionData: [], user: this.me(), pending: true },
+    };
+    let was = null;
+    const setComments = (fn) => { const d = this.details[id]; if (d) this.details[id] = { ...d, comments: fn(d.comments) }; };
+    const drop = () => {
+      const left = (this.pendingComments.get(id) ?? []).filter((x) => x !== entry);
+      if (left.length) this.pendingComments.set(id, left); else this.pendingComments.delete(id);
+    };
+    this.draftText = "";
+    this.draft.set_value("");
+    this.draftFor = null; this.draftMode = { mode: "new" };
+    this.focusList();
+    this.mutate(cx, {
+      id, tool: "save_comment", args, done: m.mode === "edit" ? tr.commentEdited : tr.commentSent(id), what: `${id} · ${tr.commentWord}`,
+      local: {
+        apply: () => {
+          this.pendingComments.set(id, [...(this.pendingComments.get(id) ?? []), entry]);
+          if (entry.editId) setComments((list) => list.map((c) => { if (c.id !== entry.editId) return c; was = c.body; return { ...c, body, pending: true }; }));
+          else setComments((list) => [...list, entry.comment]);
+        },
+        undo: () => {
+          drop();
+          if (entry.editId) setComments((list) => list.map((c) => (c.id === entry.editId ? { ...c, body: was ?? c.body, pending: false } : c)));
+          else setComments((list) => list.filter((c) => c !== entry.comment));
+        },
+        done: drop,
+      },
+      restore: (cx) => {
+        this.openComposer(id, cx, m.mode === "edit" ? { ...m, body } : m);
+        this.draftText = body;
+        this.draft.set_value(body);
+        cx.timer.after(0, () => this.draft.focus());
+      },
     });
+    if (m.mode === "new") cx.timer.after(50, (cx) => this.jump(id, "end", cx));
   }
 
   assignMe(issue, cx) {
     if (!issue) return;
-    if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
-    cx.spawn(async (cx) => {
-      if (await this.write("save_issue", { id: issue.identifier, assignee: "me" }, T().assigned(issue.identifier), cx)) {
-        await this.loadDetail(cx, issue.identifier, true);
-        this.refresh(cx, false);
-      }
-    });
+    const id = issue.identifier;
+    this.mutate(cx, { id, args: { id, assignee: "me" }, fields: { assignee: this.me() }, done: T().assigned(id) });
   }
 
   // The title or the description turns into a field where it is, as in Linear. Leaving the field saves.
   editIssue(id, cx, field = "body") {
     if (!this.canWrite) { this.say(T().connectFirst, cx); return; }
     const focus = () => cx.timer.after(0, () => (field === "title" ? this.titleInput : this.bodyDraft).focus());
-    if (this.issueEdit?.id === id && this.issueEdit.field === field && !this.issueEdit.saving) { focus(); return; }
+    if (this.issueEdit?.id === id && this.issueEdit.field === field) { focus(); return; }
     const start = () => {
       const issue = this.details[id]?.issue ?? this.cache[id];
       if (!issue) return;
@@ -621,7 +763,7 @@ export default class Linear extends View {
   // A field lost the focus: save what changed, or just close it.
   leaveEdit(field, cx) {
     const e = this.issueEdit;
-    if (!e || e.field !== field || e.saving) { cx.notify(); return; }
+    if (!e || e.field !== field) { cx.notify(); return; }
     if (this.issueEdited()) this.saveIssue(cx);
     else this.cancelEdit(cx, false);
   }
@@ -640,25 +782,18 @@ export default class Linear extends View {
 
   saveIssue(cx) {
     const e = this.issueEdit;
-    if (!e || e.saving || this.sending) return;
+    if (!e) return;
     const title = this.titleInput.value().trim(), description = this.bodyDraft.value();
     if (!title) { this.say(T().titleEmpty, cx); this.titleInput.set_value(e.title); this.cancelEdit(cx); return; }
     if (!this.issueEdited()) { this.cancelEdit(cx); return; }
-    const args = { id: e.id, ...(title !== e.title ? { title } : {}), ...(description !== e.description ? { description } : {}) };
-    // Shown right away; Linear's answer replaces it.
-    const issue = this.details[e.id]?.issue;
-    if (issue) { if (args.title) issue.title = title; if ("description" in args) issue.description = description; }
-    e.saving = true;
-    cx.notify();
-    cx.spawn(async (cx) => {
-      const ok = await this.write("save_issue", args, T().issueSaved(e.id), cx);
-      if (this.issueEdit === e) {
-        if (ok) this.cancelEdit(cx, this.editFocus !== null);
-        else { e.saving = false; cx.notify(); }
-      }
-      await this.loadDetail(cx, e.id, true);
-      if (ok) this.refresh(cx, false);
-      cx.notify();
+    const fields = { ...(title !== e.title ? { title } : {}), ...(description !== e.description ? { description } : {}) };
+    this.cancelEdit(cx, this.editFocus !== null);
+    this.mutate(cx, {
+      id: e.id, args: { id: e.id, ...fields }, fields, done: T().issueSaved(e.id),
+      restore: (cx) => {
+        this.editIssue(e.id, cx, e.field);
+        if (this.issueEdit?.id === e.id) { this.titleInput.set_value(title); this.bodyDraft.set_value(description); }
+      },
     });
   }
 
@@ -825,11 +960,10 @@ export default class Linear extends View {
     if (!p || !row) return;
     this.closeAssign(cx);
     const who = row.kind === "none" ? null : row.person;
-    cx.spawn(async (cx) => {
-      if (await this.write("save_issue", { id: p.id, assignee: who ? who.id : null }, who ? T().assignedTo(p.id, who.name) : T().unassignedFrom(p.id), cx)) {
-        await this.loadDetail(cx, p.id, true);
-        this.refresh(cx, false);
-      }
+    this.mutate(cx, {
+      id: p.id, args: { id: p.id, assignee: who ? who.id : null },
+      fields: { assignee: who ? { id: who.id, name: who.name, displayName: who.displayName ?? who.name } : null },
+      done: who ? T().assignedTo(p.id, who.name) : T().unassignedFrom(p.id),
     });
   }
 
@@ -865,12 +999,7 @@ export default class Linear extends View {
     this.statePick = null;
     cx.notify();
     if (!p || !st) return;
-    cx.spawn(async (cx) => {
-      if (await this.write("save_issue", { id: p.id, state: st.id }, T().stateSet(p.id, st.name), cx)) {
-        await this.loadDetail(cx, p.id, true);
-        this.refresh(cx, false);
-      }
-    });
+    this.mutate(cx, { id: p.id, args: { id: p.id, state: st.id }, fields: { state: st }, done: T().stateSet(p.id, st.name) });
   }
 
   stateKey(k, cx) {
@@ -975,30 +1104,25 @@ export default class Linear extends View {
   pickProp(row, cx) {
     const p = this.propPick;
     if (!p || !row) return;
-    const tr = T(), id = p.id, d = this.details[id], issue = d?.issue ?? this.cache[id];
-    let args, done;
+    const tr = T(), id = p.id, issue = this.details[id]?.issue ?? this.cache[id];
+    let args, done, fields;
     if (p.kind === "labels") {
-      // Several labels in a row: the picker stays open and the issue changes right away.
+      // Several labels in a row: the picker stays open.
       const name = row.name, on = !row.on;
-      const nodes = issue.labels?.nodes ?? [];
-      issue.labels = { nodes: on ? [...nodes, { id: row.value.id, name, color: row.value.color }] : nodes.filter((l) => l.name !== name) };
+      const nodes = issue?.labels?.nodes ?? [];
+      fields = { labels: { nodes: on ? [...nodes, { id: row.value.id, name, color: row.value.color }] : nodes.filter((l) => l.name !== name) } };
       args = on ? { id, addLabels: [row.value.id] } : { id, removeLabels: [row.value.id] };
       done = on ? tr.labelOn(id, name) : tr.labelOff(id, name);
-      cx.notify();
     } else {
       this.closeProp(cx);
       if (row.on) return;
-      if (p.kind === "priority") { args = { id, priority: row.value }; done = tr.prioritySet(id, row.value ? tr.priority[row.value] : tr.noPriority); }
-      else if (p.kind === "project") { args = { id, project: row.value ? row.value.id : null }; done = tr.projectSet(id, row.value?.name ?? tr.noProject); }
-      else if (p.kind === "cycle") { args = { id, cycle: row.value ? row.value.id : null }; done = tr.cycleSet(id, row.value ? cycleName(row.value, tr) : tr.noCycle); }
-      else if (p.kind === "due") { args = { id, dueDate: row.value }; done = tr.dueSet(id, row.value ?? tr.noDue); }
+      const v = row.value;
+      if (p.kind === "priority") { args = { id, priority: v }; fields = { priority: v }; done = tr.prioritySet(id, v ? tr.priority[v] : tr.noPriority); }
+      else if (p.kind === "project") { args = { id, project: v ? v.id : null }; fields = { project: v ? { id: v.id, name: v.name } : null }; done = tr.projectSet(id, v?.name ?? tr.noProject); }
+      else if (p.kind === "cycle") { args = { id, cycle: v ? v.id : null }; fields = { cycle: v ? { id: v.id, number: v.number, name: v.name } : null }; done = tr.cycleSet(id, v ? cycleName(v, tr) : tr.noCycle); }
+      else if (p.kind === "due") { args = { id, dueDate: v }; fields = { dueDate: v }; done = tr.dueSet(id, v ?? tr.noDue); }
     }
-    // Label clicks can come faster than Linear answers: the saves go one after the other.
-    cx.spawn((cx) => (this.propSaves = (this.propSaves ?? Promise.resolve()).then(async () => {
-      const ok = await this.write("save_issue", args, done, cx);
-      await this.loadDetail(cx, id, true);
-      if (ok) this.refresh(cx, false);
-    }).catch(() => {})));
+    if (args) this.mutate(cx, { id, args, fields, done });
   }
 
   propKey(k, cx) {
@@ -1035,7 +1159,7 @@ export default class Linear extends View {
       this.call(cx, "mine", () => api.myIssues(this.viewer.id)),
       viewId ? this.loadView(cx, viewId) : null,
     ]);
-    if (mine) { this.mine = mine; save("mine", mine.map(slim)); this.remember(mine); }
+    if (mine) { this.mine = mine.map((i) => this.overlay(i)); save("mine", mine.map(slim)); this.remember(mine); }
     const shown = this.shownId();
     if (shown) this.loadDetail(cx, shown, true);
     if (this.mode === "home") { this.loadProjects(cx); this.loadViews(cx); }
@@ -1050,6 +1174,7 @@ export default class Linear extends View {
     const isProject = this.viewOf(`${VIEW_TAB}${viewId}`)?.kind === "project";
     const page = await this.call(cx, `v:${viewId}`, () => (isProject ? api.projectIssues : api.viewIssues)(viewId, more ? have.cursor : null));
     if (!page) return;
+    page.nodes = page.nodes.map((i) => this.overlay(i));
     const fresh = new Set(page.nodes.map((i) => i.id));
     const nodes = more ? [...(have?.nodes ?? []), ...page.nodes.filter((i) => !(have?.nodes ?? []).some((x) => x.id === i.id))]
       : [...page.nodes, ...(have?.nodes ?? []).slice(api.PAGE_SIZE).filter((i) => !fresh.has(i.id))];
@@ -1236,11 +1361,12 @@ export default class Linear extends View {
     const d = await this.call(cx, `d:${id}`, () => api.issueDetail(id));
     if (d === null) { this.status = { text: T().notFound(id), level: "error" }; return; }
     if (!d) return;
-    this.details[id] = d;
+    this.details[id] = this.withPending(id, { ...d, issue: this.overlay(d.issue) });
     this.remember([d.issue]);
     // Keep details of recent issues and the top of my list in the cache, for instant previews.
     const keep = new Set([...this.recent.slice(0, 20), ...this.mine.slice(0, 10).map((i) => i.identifier), id]);
-    save("details", Object.fromEntries(Object.entries(this.details).filter(([k]) => keep.has(k)).slice(-30)));
+    save("details", Object.fromEntries(Object.entries(this.details).filter(([k]) => keep.has(k)).slice(-30)
+      .map(([k, v]) => [k, { ...v, comments: v.comments.filter((c) => !c.pending) }])));
     this.prefetchImages(cx, d);
     // An issue only carries its cycle's id: the team's cycles give the name.
     const team = d.issue.team?.id;
@@ -1986,8 +2112,9 @@ export default class Linear extends View {
       .on_key_down((e, cx) => this.onKey(e, cx))
       .on_mouse_up("left", (_e, cx) => this.release(cx));
     this.links = this.tabLinks();
-    if (this.pick) return root.child(this.header(t)).child(this.pickView(t)).child(this.footer(t));
-    if (this.mode === "home") return root.child(this.header(t)).child(this.homeView(t)).child(this.footer(t))
+    const top = (el) => el.child(this.header(t)).when(this.saveErrors.length > 0, (el) => el.child(this.saveErrorBar(t)));
+    if (this.pick) return top(root).child(this.pickView(t)).child(this.footer(t));
+    if (this.mode === "home") return top(root).child(this.homeView(t)).child(this.footer(t))
       .when(Boolean(this.creating), (el) => el.child(this.createView(t)))
       .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsView(t)));
     const body = this.mode === "detail"
@@ -1995,7 +2122,7 @@ export default class Linear extends View {
       : this.overviewShown() ? this.overviewView(t, this.projectTab())
       : this.layout === "board" ? this.boardView(t)
       : this.listView(t);
-    return root.child(this.header(t)).when(this.mode === "list", (el) => el.child(this.listBar(t))).child(body).child(this.footer(t))
+    return top(root).when(this.mode === "list", (el) => el.child(this.listBar(t))).child(body).child(this.footer(t))
       .when(Boolean(this.pop) && this.mode === "list", (el) => el.child(this.popView(t)))
       .when(Boolean(this.lightbox), (el) => el.child(this.lightboxView(t)))
       .when(Boolean(this.creating), (el) => el.child(this.createView(t)))
@@ -2035,11 +2162,30 @@ export default class Linear extends View {
             .on_mouse_down("left", stop).on_click((_e, cx) => this.setProjectPane(key, cx)).child(label);
         }))))
       .child(div().flex_1())
-      .when(busy, (el) => el.child(svg(`${ICON}/spinner.svg`).size(13).text_color(t.dim).spin(900)))
+      .when(this.saveCount > 0, (el) => el.child(h_flex().id("saving").flex_none().h(22).px(8).gap(6).items_center().rounded(11)
+        .bg(t.selected).text_size(11.5).text_color(t.foreground)
+        .child(svg(`${ICON}/spinner.svg`).size(12).text_color(t.accent).spin(900)).child(T().savingN(this.saveCount))))
+      .when(busy && !this.saveCount, (el) => el.child(svg(`${ICON}/spinner.svg`).size(13).text_color(t.dim).spin(900)))
       .when(this.mode === "list", (el) => el.child(this.layoutSwitch(t)))
       .when(this.canWrite, (el) => el.child(this.iconButton(t, "l-new", "+", (cx) => this.openCreate(cx))))
       .child(this.iconButton(t, "l-refresh", "↻", (cx) => this.reload(cx)))
       .when(Boolean(props()?.overlay) || Boolean(props()?.side), (el) => el.child(this.iconButton(t, "l-close", svg(`${ICON}/close.svg`).size(13), () => this.dismiss())));
+  }
+
+  saveErrorBar(t) {
+    const tr = T(), err = this.saveErrors[this.saveErrors.length - 1], more = this.saveErrors.length - 1;
+    const small = (el) => el.h(22).px(8).text_size(11.5);
+    return h_flex().id("save-error").flex_none().px(14).py(7).gap(8).items_center().border_b(1).border_color(URGENT).bg(`${URGENT}1f`)
+      .child(v_flex().flex_1().min_w(0)
+        .child(h_flex().gap(8).items_center().min_w(0)
+          .child(div().min_w(0).truncate().text_size(12.5).font_semibold().text_color(URGENT).child(tr.saveFailed(err.what)))
+          .when(more > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(tr.saveFailedMore(more)))))
+        .child(div().min_w(0).truncate().text_size(11.5).text_color(t.muted).child(tr.err[err.kind] && err.kind !== "graphql" ? `${tr.err[err.kind]} · ${err.message}` : err.message)))
+      .when(err.kind === "auth", (el) => el.child(small(this.button(t, "se-connect", this.connecting ? tr.connecting : tr.connectLinear, (cx) => this.connect(cx), true))))
+      .child(small(this.button(t, "se-back", tr.saveBack(err.id), (cx) => this.saveBack(err, cx), true)))
+      .when(err.kind !== "auth", (el) => el.child(small(this.button(t, "se-retry", tr.saveRetry, (cx) => this.retrySave(err, cx)))))
+      .child(small(this.button(t, "se-copy", tr.copyError, (cx) => { cx.write_to_clipboard(this.errorReport()); this.say(tr.errorCopied, cx, "success"); })))
+      .child(this.iconButton(t, "se-close", svg(`${ICON}/close.svg`).size(12), (cx) => this.dropSaveError(err, cx)));
   }
 
   breadcrumb(t) {
@@ -2802,9 +2948,10 @@ export default class Linear extends View {
       .child(h_flex().gap(8).items_center().text_size(11.5)
         .child(this.avatar(t, name, reply ? 18 : 20))
         .child(div().font_semibold().flex_none().child(name))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(ago(c.createdAt) + (c.editedAt ? tr.edited : "")))
-        .when(this.canWrite && !reply, (el) => el.child(this.miniButton(t, `${rkey}-reply`, tr.reply, (cx) => this.openComposer(id, cx, { mode: "reply", parentId: c.id, who: name }))))
-        .when(this.canWrite && Boolean(this.viewer?.id) && c.user?.id === this.viewer.id, (el) => el.child(this.miniButton(t, `${rkey}-edit`, tr.edit, (cx) => this.openComposer(id, cx, { mode: "edit", commentId: c.id, body: c.body ?? "" }))))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(c.pending ? tr.sendingComment : ago(c.createdAt) + (c.editedAt ? tr.edited : "")))
+        .when(c.pending, (el) => el.child(svg(`${ICON}/spinner.svg`).size(11).text_color(t.dim).spin(900)))
+        .when(this.canWrite && !reply && !c.pending, (el) => el.child(this.miniButton(t, `${rkey}-reply`, tr.reply, (cx) => this.openComposer(id, cx, { mode: "reply", parentId: c.id, who: name }))))
+        .when(this.canWrite && !c.pending && Boolean(this.viewer?.id) && c.user?.id === this.viewer.id, (el) => el.child(this.miniButton(t, `${rkey}-edit`, tr.edit, (cx) => this.openComposer(id, cx, { mode: "edit", commentId: c.id, body: c.body ?? "" }))))
         .child(this.miniButton(t, `${rkey}-copy`, tr.copyShort, (cx) => this.copy(c.body ?? "", tr.commentWord, cx))))
       .child(this.markdown(t, rkey, c.body ?? "", maxW))
       .when(Boolean(bar), (el) => el.child(bar));
