@@ -1,13 +1,13 @@
 ---
 name: sdlc-complexity
-description: From the [grill] summary and the code: complexity, risk 0-4, work type, small-and-unambiguous, confidence.
+description: "From the [grill] summary and the code: complexity, risk 0-4, work type, small-and-unambiguous, confidence."
 disable-model-invocation: true
 argument-hint: "<ID>"
 ---
 
 # Complexity and risk
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 From `[grill]` and the code it touches:
 

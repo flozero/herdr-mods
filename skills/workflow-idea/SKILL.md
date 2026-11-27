@@ -1,12 +1,12 @@
 ---
 name: workflow-idea
-description: Take a rough idea to a decision: grill, explore, options, a POC when the doubt is technical, then go (a Linear issue ready for workflow-linear-build), park or kill. Use when Florent has an idea, in any repo.
+description: "Take a rough idea to a decision: grill, explore, options, a POC when the doubt is technical, then go (a Linear issue ready for workflow-linear-build), park or kill. Use when Florent has an idea, in any repo."
 argument-hint: "<the idea>"
 ---
 
 # From an idea to an issue
 
-The phase before `workflow-linear-build`. Each step is a skill: Read its `~/.claude/skills/<name>/SKILL.md` and follow it. Go on by yourself; at ✋ stop until Florent says yes.
+The phase before `workflow-linear-build`. Each step is a skill: Read its `../<name>/SKILL.md` (from this skill's base directory) and follow it. Go on by yourself; at ✋ stop until Florent says yes.
 
 1. **Capture**: the memory file (below), with the idea in Florent's words, the repo, today's date.
 2. `sdlc-grill` ✋
@@ -24,4 +24,4 @@ Done when the idea is killed with its reason written, or is an issue that says e
 
 ## Conventions
 
-`~/.claude/skills/sdlc-conventions/SKILL.md`. The **memory file** is `~/.herdr/ideas/<repo>/worktrees/<slug>.md`: `<repo>` the repository's folder name (the current folder's when it is not one), `<slug>` a few words of the idea in kebab-case.
+`../sdlc-conventions/SKILL.md`. The **memory file** is `~/.herdr/ideas/<repo>/worktrees/<slug>.md`: `<repo>` the repository's folder name (the current folder's when it is not one), `<slug>` a few words of the idea in kebab-case.

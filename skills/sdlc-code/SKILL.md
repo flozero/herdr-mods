@@ -1,15 +1,15 @@
 ---
 name: sdlc-code
-description: Implement the spec's part without asking: tracer bullet, test first, deviations and out-of-scope findings written down instead of asked.
+description: "Implement the spec's part without asking: tracer bullet, test first, deviations and out-of-scope findings written down instead of asked."
 disable-model-invocation: true
 argument-hint: "<ID>"
 ---
 
 # Code
 
-After Matt Pocock's `implement` and `tdd` skills (github.com/mattpocock/skills, MIT). Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+After Matt Pocock's `implement` and `tdd` skills (github.com/mattpocock/skills, MIT). Conventions: `../sdlc-conventions/SKILL.md`.
 
-The spec is agreed: ask Florent nothing. Follow `~/.claude/skills/sdlc-florent-style/SKILL.md`.
+The spec is agreed: ask Florent nothing. Follow `../sdlc-florent-style/SKILL.md`.
 
 1. A tracer bullet first: the thinnest path through every layer the change touches, then widen it.
 2. Test first where there is a seam: red, green, next. Type checker and the single test files as you go.

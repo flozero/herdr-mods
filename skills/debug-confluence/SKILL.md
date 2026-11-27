@@ -1,6 +1,6 @@
 ---
 name: debug-confluence
-description: Find the on-call runbook or process in Confluence (the engineering knowledge base) that matches a production problem. Use when investigating a production problem.
+description: "Find the on-call runbook or process in Confluence (the engineering knowledge base) that matches a production problem. Use when investigating a production problem."
 argument-hint: "<the problem, or the alert's name>"
 ---
 

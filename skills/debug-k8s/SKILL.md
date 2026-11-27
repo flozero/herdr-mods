@@ -1,6 +1,6 @@
 ---
 name: debug-k8s
-description: Read the Kubernetes clusters at Flare through carbon/bin/kubectl-*: pods, restarts, events, logs, resources. Use when investigating a production problem.
+description: "Read the Kubernetes clusters at Flare through carbon/bin/kubectl-*: pods, restarts, events, logs, resources. Use when investigating a production problem."
 argument-hint: "<env> <namespace or service> <question>"
 ---
 

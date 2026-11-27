@@ -1,6 +1,6 @@
 ---
 name: debug-psql
-description: Query a Flare Postgres database read-only through carbon/bin/psql-*, to check the data behind a production problem. Use when investigating a production problem.
+description: "Query a Flare Postgres database read-only through carbon/bin/psql-*, to check the data behind a production problem. Use when investigating a production problem."
 argument-hint: "<env> <db> <question>"
 ---
 

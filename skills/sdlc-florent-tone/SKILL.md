@@ -1,6 +1,6 @@
 ---
 name: sdlc-florent-tone
-description: Florent's tone for merge request descriptions and comments: read before writing them.
+description: "Florent's tone for merge request descriptions and comments: read before writing them."
 disable-model-invocation: true
 ---
 

@@ -1,12 +1,12 @@
 ---
 name: workflow-linear-build
-description: Build a Linear issue end to end, from understanding it to Released: grill, risk, spec, sub-issues, merge requests, watch, deploy, recap, cost. Use when Florent starts work on an issue (an id like PLA-123).
+description: "Build a Linear issue end to end, from understanding it to Released: grill, risk, spec, sub-issues, merge requests, watch, deploy, recap, cost. Use when Florent starts work on an issue (an id like PLA-123)."
 argument-hint: "<Linear ID>"
 ---
 
 # Build a Linear issue
 
-After Sylvain's AI-SDLC, phase 2 (Build). Each step is a skill: Read its `~/.claude/skills/<name>/SKILL.md` and follow it. Go on by yourself; at ✋ stop until Florent says yes.
+After Sylvain's AI-SDLC, phase 2 (Build). Each step is a skill: Read its `../<name>/SKILL.md` (from this skill's base directory) and follow it. Go on by yourself; at ✋ stop until Florent says yes.
 
 1. `sdlc-linear-issue-update`: assign to Florent, **In Development**.
 2. `sdlc-rebase`
@@ -27,4 +27,4 @@ Done when the issue is Released, its `[recap]` posted, the worktrees removed and
 
 ## Conventions
 
-`~/.claude/skills/sdlc-conventions/SKILL.md`. The **memory file** is `~/.herdr/workflows/<ID>.md`: create it at step 1 (issue id, title, url, branch, worktree).
+`../sdlc-conventions/SKILL.md`. The **memory file** is `~/.herdr/workflows/<ID>.md`: create it at step 1 (issue id, title, url, branch, worktree).

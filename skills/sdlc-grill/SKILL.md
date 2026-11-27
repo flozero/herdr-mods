@@ -1,6 +1,6 @@
 ---
 name: sdlc-grill
-description: Grill Florent in rounds until a request or Linear issue is clear to both of you, drawing it when it helps; ends with an agreed summary. Use before building anything unclear.
+description: "Grill Florent in rounds until a request or Linear issue is clear to both of you, drawing it when it helps; ends with an agreed summary. Use before building anything unclear."
 argument-hint: "<ID or the request>"
 ---
 

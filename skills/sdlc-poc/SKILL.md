@@ -1,13 +1,13 @@
 ---
 name: sdlc-poc
-description: A throwaway proof of concept that answers the chosen option's doubt, in its own worktree, without a merge request.
+description: "A throwaway proof of concept that answers the chosen option's doubt, in its own worktree, without a merge request."
 disable-model-invocation: true
 argument-hint: "<ID or idea slug>"
 ---
 
 # Proof of concept
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 1. Write the **question** it answers ("does X hold under Y", "what does Z cost") and the **limit** (a time or a size) in the memory file, and get Florent's yes.
 2. A worktree on the branch `poc/<slug>` from the default branch, outside the repo's folder (`git worktree add`). Write its path in the memory file.

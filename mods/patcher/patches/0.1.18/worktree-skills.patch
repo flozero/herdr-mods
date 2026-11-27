@@ -34,33 +34,44 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
  import { run, props, closeOverlay, theme, spaces, panes, terminals, exec, home, appHome, readTextFile } from "herdr";
  
  // Where a space is now: its first terminal's live folder, else where it was made.
-@@ -240,6 +240,51 @@
+@@ -240,6 +240,63 @@
  const toSlug = (text) => (text.trim().split("\n").pop() ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
  import { checking } from "herdr";
  
-+// Skills to start the agent with: the SKILL.md files in ~/.claude/skills and the repo's
-+// .claude/skills whose name starts with the prefix typed in the dialog (kept for next time).
-+// SKILL_SCAN prints "@@ <path>" then each file's front matter.
-+const SKILL_SCAN = `set -- "$HOME/.claude/skills" "$@"
-+for d in "$@"; do
-+  for f in "$d"/*/SKILL.md; do
++// Skills to start the agent with: the SKILL.md files in ~/.claude/skills, the repo's .claude/skills
++// and the plugins installed for you or for this repo (named <plugin>:<skill>), whose name starts
++// with the prefix typed in the dialog (kept for next time).
++// SKILL_SCAN, given the repo, prints "@@ <plugin, or -> <path>" then each file's front matter.
++const SKILL_SCAN = `scan() {
++  for f in "$1"/*/SKILL.md; do
 +    [ -f "$f" ] || continue
-+    echo "@@ $f"
++    echo "@@ $2 $f"
 +    awk 'NR == 1 && /^---/ { on = 1; next } on && /^---/ { exit } on' "$f"
 +  done
-+done`;
++}
++scan "$HOME/.claude/skills" -
++scan "$1/.claude/skills" -
++command -v node >/dev/null 2>&1 || exit 0
++node -e '
++const fs = require("fs"), j = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
++for (const [k, v] of Object.entries(j.plugins || {})) {
++  const e = (v || []).find((x) => x.scope === "user" || x.projectPath === process.argv[2]);
++  if (e) console.log(k.split("@")[0] + " " + e.installPath);
++}' "$HOME/.claude/plugins/installed_plugins.json" "$1" 2>/dev/null | while read -r plugin dir; do scan "$dir/skills" "$plugin"; done`;
 +const SKILL_PREFIX = `${appHome()}/.cache/worktree-skills.json`;
 +const unquote = (v) => v.trim().replace(/^(["'])(.*)\1$/, "$2");
 +function parseSkills(out) {
 +  const list = [], seen = new Set();
 +  for (const block of String(out ?? "").split(/^@@ /m).slice(1)) {
-+    const [path, ...lines] = block.split("\n");
++    const [head, ...lines] = block.split("\n");
++    const [, plugin, path] = /^(\S+) (.*)$/.exec(head) ?? [, "-", head];
 +    const meta = {};
 +    for (const l of lines) {
 +      const m = /^([\w-]+):\s*(.*)$/.exec(l);
 +      if (m) meta[m[1]] = unquote(m[2]);
 +    }
-+    const name = meta.name || path.split("/").slice(-2)[0];
++    const base = meta.name || path.split("/").slice(-2)[0];
++    const name = base && plugin !== "-" ? `${plugin}:${base}` : base;
 +    if (!name || seen.has(name)) continue;
 +    seen.add(name);
 +    list.push({ name, description: meta.description ?? "", invocable: meta["disable-model-invocation"] !== "true" });
@@ -70,7 +81,8 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
 +// "workflow-, linear-": the skills starting with one of them; empty keeps them all.
 +function withPrefix(list, prefix) {
 +  const ps = String(prefix ?? "").split(/[\s,]+/).filter(Boolean);
-+  return ps.length ? list.filter((s) => ps.some((p) => s.name.startsWith(p))) : list;
++  const bare = (name) => name.slice(name.indexOf(":") + 1);
++  return ps.length ? list.filter((s) => ps.some((p) => s.name.startsWith(p) || bare(s.name).startsWith(p))) : list;
 +}
 +// Clicking a skill writes "Use the <name> skill." on its own line where the cursor is.
 +function insertSkill(text, at, name) {
@@ -149,7 +161,7 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
 +      this.loadingPrefix = true;
 +      this.prefix.set_value(prefix);
 +      this.loadingPrefix = false;
-+      const r = await exec("sh", ["-c", SKILL_SCAN, "sh", `${repo.main}/.claude/skills`], { on: this.on }).catch(() => null);
++      const r = await exec("sh", ["-c", SKILL_SCAN, "sh", repo.main], { on: this.on }).catch(() => null);
 +      this.skills = parseSkills(r?.stdout ?? "");
 +      cx.notify();
 +    });
@@ -190,7 +202,7 @@ diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
 +      .child(div().relative().flex_1().min_h(0)
 +        .child(v_flex().id("skills-list").size_full().overflow_y_scroll().gap(1)
 +          .when(this.skills === null, (el) => el.child(div().text_size(12).text_color(t.dim).child("…")))
-+          .when(this.skills !== null && !shown.length, (el) => el.child(div().text_size(12).text_color(t.dim).child("No skill with this prefix in ~/.claude/skills or the repo's .claude/skills.")))
++          .when(this.skills !== null && !shown.length, (el) => el.child(div().text_size(12).text_color(t.dim).child("No skill with this prefix in ~/.claude/skills, the repo's .claude/skills or your plugins.")))
 +          .children(shown.filter((x) => x.invocable).map(row))
 +          .when(shown.some((x) => x.invocable) && shown.some((x) => !x.invocable), (el) => el.child(h_flex().flex_none().gap(6).items_center().px(8).py(4)
 +            .child(div().flex_1().h(1).bg(t.border)).child(div().text_size(10).text_color(t.dim).child("manual")).child(div().flex_1().h(1).bg(t.border))))

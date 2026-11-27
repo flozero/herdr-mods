@@ -1,13 +1,13 @@
 ---
 name: sdlc-watch-mr
-description: Watch merge requests until merged: fix failed pipelines, act on the dev agent's comments, bring anyone else's to Florent with an opinion.
+description: "Watch merge requests until merged: fix failed pipelines, act on the dev agent's comments, bring anyone else's to Florent with an opinion."
 disable-model-invocation: true
 argument-hint: "<ID> [merge request link]"
 ---
 
 # Watch the merge request
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 The dev agent's GitLab username is `devAgent` in `~/.herdr/workflows/config.json`; missing: ask Florent once, write it there.
 

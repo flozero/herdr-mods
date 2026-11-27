@@ -1,13 +1,13 @@
 ---
 name: sdlc-create-mr
-description: Open the merge request: an Excalidraw schema as PNG, the Linear ref, risk, confidence, claude --resume; Florent previews it unless it is trivial.
+description: "Open the merge request: an Excalidraw schema as PNG, the Linear ref, risk, confidence, claude --resume; Florent previews it unless it is trivial."
 disable-model-invocation: true
 argument-hint: "<ID>"
 ---
 
 # Merge request
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`. Follow `~/.claude/skills/sdlc-florent-tone/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`. Follow `../sdlc-florent-tone/SKILL.md`.
 
 1. **Schema**: draw what changed with the excalidraw MCP (`open_canvas` named `<ID>-mr`, `draw`): before and after, a flow, a call tree or files, small. `export_png`, then Read the PNG.
 2. **Description**, the repository's template first when it has one (`.gitlab/merge_request_templates/`), then:

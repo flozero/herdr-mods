@@ -9,6 +9,7 @@ copy_mod() {
 install_skill() {
   src="$here/skills/$1/SKILL.md"
   dir="$skills/$1"
+  if [ -L "$dir" ]; then echo "  skill $1 left as it is: linked to $(readlink "$dir")"; return; fi
   new=$(cksum < "$src")
   if [ -f "$dir/SKILL.md" ]; then
     have=$(cksum < "$dir/SKILL.md")

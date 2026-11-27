@@ -1,6 +1,6 @@
 ---
 name: debug-pganalyze
-description: Read pganalyze for a production database: slow queries, locks, backends, table and index health. Use when a production problem may come from Postgres.
+description: "Read pganalyze for a production database: slow queries, locks, backends, table and index health. Use when a production problem may come from Postgres."
 argument-hint: "<database> <window> <question>"
 ---
 

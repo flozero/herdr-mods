@@ -1,12 +1,12 @@
 ---
 name: sdlc-linear-issue-update
-description: Write to Linear: a new issue, a marked comment ([grill], [risk], [spec], [followup], [recap], and on-call's [timeline], [finding], [observe], [daily], [handover]), the status, the assignee, the risk-0..risk-4 and work-type labels, sub-issues. The one writer to Linear in the sdlc flow.
+description: "Write to Linear: a new issue, a marked comment ([grill], [risk], [spec], [followup], [recap], and on-call's [timeline], [finding], [observe], [daily], [handover]), the status, the assignee, the risk-0..risk-4 and work-type labels, sub-issues. The one writer to Linear in the sdlc flow."
 argument-hint: "<ID> <what to change>"
 ---
 
 # Update the Linear issue
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 Linear goes through `node ~/.config/herdr-app/mods/linear/cli/linear-me.mjs call <tool> -` with the JSON on stdin in a quoted heredoc (`<<'EOF'`): this machine kills a `node` whose argument is about 1000 characters or more.
 

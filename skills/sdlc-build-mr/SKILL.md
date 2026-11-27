@@ -1,13 +1,13 @@
 ---
 name: sdlc-build-mr
-description: One merge request from its part of [spec]: code, review, build-lint-test, rebase, create the merge request.
+description: "One merge request from its part of [spec]: code, review, build-lint-test, rebase, create the merge request."
 disable-model-invocation: true
 argument-hint: "<ID or sub-issue ID>"
 ---
 
 # Build one merge request
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 In order: `sdlc-code`, `sdlc-review`, `sdlc-blt`, `sdlc-rebase`, `sdlc-create-mr`. What review or blt finds goes back to `sdlc-code`, then through them again.
 

@@ -1,13 +1,13 @@
 ---
 name: sdlc-oncall-finding
-description: From [timeline]: the cause, how to fix it, and whether a team must be called, with the message ready.
+description: "From [timeline]: the cause, how to fix it, and whether a team must be called, with the message ready."
 disable-model-invocation: true
 argument-hint: "<sub-issue>"
 ---
 
 # Finding
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 From `[timeline]` and the code:
 

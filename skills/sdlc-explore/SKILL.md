@@ -1,13 +1,13 @@
 ---
 name: sdlc-explore
-description: What already exists around a grilled idea: the code, the Linear issues that overlap it, the constraints, how others do it.
+description: "What already exists around a grilled idea: the code, the Linear issues that overlap it, the constraints, how others do it."
 disable-model-invocation: true
 argument-hint: "<ID or idea slug>"
 ---
 
 # Explore
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 From the grill's summary, find (facts, not decisions; send sub-agents in parallel when the parts are independent):
 

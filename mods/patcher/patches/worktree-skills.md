@@ -9,8 +9,10 @@ Made on top of: `statusbar`.
 
 In `mods/worktree` → `my-worktree` (New worktree):
 
-- **Skills**: a sidebar on the right lists the skills in `~/.claude/skills` and the repo's
-  `.claude/skills` (on the space's machine) whose name starts with the prefix typed at its top,
+- **Skills**: a sidebar on the right lists the skills in `~/.claude/skills`, the repo's
+  `.claude/skills` and the plugins installed for you or for this repo, as `<plugin>:<skill>`
+  (`~/.claude/plugins/installed_plugins.json`, read with `node`; on the space's machine), whose
+  name, or its part after `<plugin>:`, starts with the prefix typed at its top,
   with their description; `manual` tags a skill with `disable-model-invocation: true`. A click
   writes "Use the <name> skill." on its own line where the cursor is in the message, so the
   message stays yours to arrange. The prefix (`workflow-` at first, several split by commas,
@@ -34,7 +36,7 @@ In `mods/worktree` → `my-worktree` (New worktree):
 
 ## How to check it works
 
-- ⌘⇧N: the SKILLS sidebar lists your `workflow-*` skills, tagged `manual`. Type `linear-` in the
+- ⌘⇧N: the SKILLS sidebar lists your `workflow-*` skills, and a plugin's as `<plugin>:workflow-…`. Type `linear-` in the
   prefix: the list changes; close and open again: `linear-` is still there.
 - Type a line, click two skills: each lands on its own line under the cursor. ⌘↵: the agent's
   first message is exactly what the field shows.

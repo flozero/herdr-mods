@@ -1,13 +1,13 @@
 ---
 name: sdlc-to-spec
-description: The spec from [grill]: goal, acceptance criteria, fanout (one merge request, several, or a stack) with the files of each.
+description: "The spec from [grill]: goal, acceptance criteria, fanout (one merge request, several, or a stack) with the files of each."
 disable-model-invocation: true
 argument-hint: "<ID>"
 ---
 
 # Spec
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 From `[grill]`, `[risk]` and the code:
 

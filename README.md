@@ -1,8 +1,6 @@
 # herdr-mods
 
-> # ⚠️ BETA: this changes a lot
-
-Mods for the [Herdr app](https://herdr.dev).
+Mods for the [Herdr app](https://herdr.dev), and the Claude Code skills and hooks they start agents with.
 
 ## TL;DR
 
@@ -44,13 +42,15 @@ A mod is a folder with a `mod.json` and a `main.js` that Herdr runs as a panel, 
 
 Each group installs alone (`./install-<group>.sh`) and has its README: what it does, its config, keys and requirements.
 
-- [worktree](mods/worktree-new/README.md): Herdr's worktree dialog, patched: a first message to the agent, a suggested branch, setup and teardown. `cmd-shift-n` / `cmd-shift-o` (Linux `ctrl-alt-n` / `ctrl-alt-o`), only in the `my-main` layout.
-- [linear](mods/linear/README.md): Linear issues, and Work with the agent on one. `cmd-i` / `cmd-shift-i` (Linux `ctrl-shift-i` / `ctrl-alt-i`).
+- [worktree](mods/worktree-new/README.md): Herdr's worktree dialog, patched (by the [patcher](mods/patcher/README.md)): a first message to the agent of several lines, a sidebar of skills to start it with, a suggested branch, setup and teardown. `cmd-shift-n` / `cmd-shift-o` (Linux `ctrl-alt-n` / `ctrl-alt-o`), only in the `my-main` layout.
+- [linear](mods/linear/README.md): Linear issues, and Work with the agent on one (it opens New worktree, filled in from the issue). `cmd-i` / `cmd-shift-i` (Linux `ctrl-shift-i` / `ctrl-alt-i`).
 - [gitlab-review](mods/gitlab-review/README.md): review GitLab merge requests with `glab`. `cmd-shift-g` (Linux `ctrl-alt-g`).
 - [sentry](mods/sentry/README.md): Sentry issues through Sentry's MCP. `cmd-s` / `cmd-shift-s` (Linux `ctrl-shift-s` / `ctrl-alt-s`).
 - [http](mods/http/README.md): an HTTP client in a pane, with variables and an MCP for the agent to write requests. `cmd-shift-h` (Linux `ctrl-alt-h`).
-- [excalidraw](mods/excalidraw/README.md): an Excalidraw canvas an agent can draw on. `cmd-shift-e` (Linux `ctrl-alt-e`).
+- [excalidraw](mods/excalidraw/README.md): an Excalidraw canvas an agent can draw on, and save as a PNG. `cmd-shift-e` (Linux `ctrl-alt-e`).
 - [code](mods/code/README.md): Herdr's own editor with language servers, the branch's changes and review comments for the agent, needs the Herdr fork with the editor language-server API. `cmd-e` (Linux `ctrl-alt-c`).
 - [vscode](mods/vscode/README.md): VS Code in a pane, needs the Herdr fork with the webview. `cmd-alt-e` (Linux `ctrl-alt-shift-e`).
+
+- [skills](skills/README.md): the workflows (`workflow-linear-build`, `workflow-idea`, `workflow-oncall`, `workflow-oncall-incident`), their `sdlc-*` steps and the read-only `debug-*` skills, copied to `~/.claude/skills`; and the compaction hooks, copied to `~/.claude/hooks` (wired by hand in `~/.claude/settings.json`). The same skills are in flare-claude-skills, `skills/fgiraud`.
 
 The agent is Claude by default; `agent` and `agentName` in a mod's `config.json` (in `settings.json` `worktrees` for the worktree mods) pick another.

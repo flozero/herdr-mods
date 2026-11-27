@@ -1,13 +1,13 @@
 ---
 name: sdlc-oncall-daily-sync
-description: Each morning of an on-call week: the day before's incidents summed up on the parent, and an agent offered for each one not Released yet.
+description: "Each morning of an on-call week: the day before's incidents summed up on the parent, and an agent offered for each one not Released yet."
 disable-model-invocation: true
 argument-hint: "<PARENT>"
 ---
 
 # Daily sync
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 1. The parent's sub-issues created or updated since the last `[daily …]` (`list_issues`, `parentId`, `updatedAt`), with their `[timeline]`, `[finding]`, `[risk]`, `[observe]`.
 2. `sdlc-linear-issue-update`: `[daily <yesterday>]` on the parent, one table, a line per sub-issue:

@@ -1,6 +1,6 @@
 ---
 name: debug-sentry
-description: Read Sentry for a production problem: the issues and errors of a service in a window, their stack traces, the release that brought them. Use when investigating a production problem.
+description: "Read Sentry for a production problem: the issues and errors of a service in a window, their stack traces, the release that brought them. Use when investigating a production problem."
 argument-hint: "<service> <window> <question>"
 ---
 

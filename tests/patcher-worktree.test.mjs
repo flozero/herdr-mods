@@ -292,16 +292,18 @@ test("while it creates, the fields are plain text: nothing can be typed in them"
 test("skills come from their front matter, filtered by the prefix, and a click writes one on its own line", { skip }, () => {
   const h = harness();
   const out = [
-    "@@ /h/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", 'description: "Grill a plan"', "disable-model-invocation: true",
-    "@@ /h/.claude/skills/other/SKILL.md", "name: other", "description: x",
-    "@@ /r/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", "description: repo copy",
-    "@@ /r/.claude/skills/workflow-ship/SKILL.md", "description: ship it",
+    "@@ - /h/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", 'description: "Grill a plan"', "disable-model-invocation: true",
+    "@@ - /h/.claude/skills/other/SKILL.md", "name: other", "description: x",
+    "@@ - /r/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", "description: repo copy",
+    "@@ - /r/.claude/skills/workflow-ship/SKILL.md", "description: ship it",
+    "@@ fgiraud /h/.claude/plugins/cache/m/fgiraud/0.0.1/skills/workflow-idea/SKILL.md", "name: workflow-idea", 'description: "An idea: a decision"',
   ].join("\n");
   const list = h.parseSkills(out);
-  assert.deepEqual(list.map((s) => [s.name, s.description, s.invocable]), [["other", "x", true], ["workflow-grill", "Grill a plan", false], ["workflow-ship", "ship it", true]]);
-  assert.deepEqual(h.withPrefix(list, "workflow-").map((s) => s.name), ["workflow-grill", "workflow-ship"]);
+  assert.deepEqual(list.map((s) => [s.name, s.description, s.invocable]), [["fgiraud:workflow-idea", "An idea: a decision", true], ["other", "x", true], ["workflow-grill", "Grill a plan", false], ["workflow-ship", "ship it", true]]);
+  assert.deepEqual(h.withPrefix(list, "workflow-").map((s) => s.name), ["fgiraud:workflow-idea", "workflow-grill", "workflow-ship"]);
+  assert.deepEqual(h.withPrefix(list, "fgiraud:").map((s) => s.name), ["fgiraud:workflow-idea"]);
   assert.deepEqual(h.withPrefix(list, "other, workflow-s").map((s) => s.name), ["other", "workflow-ship"]);
-  assert.equal(h.withPrefix(list, " ").length, 3);
+  assert.equal(h.withPrefix(list, " ").length, 4);
   assert.deepEqual(h.insertSkill("", 0, "a"), { text: "Use the a skill.\n", at: 17 });
   assert.deepEqual(h.insertSkill("do X", 4, "a"), { text: "do X\nUse the a skill.\n", at: 22 });
   assert.deepEqual(h.insertSkill("do X\nthen Y", 5, "a"), { text: "do X\nUse the a skill.\nthen Y", at: 22 });

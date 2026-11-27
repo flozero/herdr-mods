@@ -1,6 +1,6 @@
 ---
 name: sdlc-florent-style
-description: Florent's code style: read before writing or reviewing code.
+description: "Florent's code style: read before writing or reviewing code."
 disable-model-invocation: true
 ---
 

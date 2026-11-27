@@ -1,13 +1,13 @@
 ---
 name: sdlc-options
-description: Two or three ways to do a grilled and explored idea, each with its cost, its risk and what it leaves out, and the one to pick.
+description: "Two or three ways to do a grilled and explored idea, each with its cost, its risk and what it leaves out, and the one to pick."
 disable-model-invocation: true
 argument-hint: "<ID or idea slug>"
 ---
 
 # Options
 
-Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
+Conventions: `../sdlc-conventions/SKILL.md`.
 
 From the grill's summary and the exploration, two or three options that differ in kind, not in detail. Doing nothing counts when it is a real choice. For each:
 
