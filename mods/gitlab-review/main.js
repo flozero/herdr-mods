@@ -2619,7 +2619,7 @@ export default class GitlabReview extends View {
   shortcutsModal(t) {
     return div().id("shortcuts-backdrop").absolute().inset_0().flex().items_center().justify_center().bg("#0000002e")
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.toggleShortcuts(cx); })
-      .child(v_flex().id("shortcuts").w(440).max_h_full().p(14).gap(2).rounded(10).border_1().border_color(t.border).bg(t.popover).overflow_y_scrollbar()
+      .child(v_flex().id("shortcuts").w(440).max_h_full().p(14).gap(2).rounded(10).border_1().border_color(t.border).bg(t.popover).overflow_hidden()
         .on_mouse_down("left", stop)
         .child(div().pb(8).text_size(13).font_semibold().child("Shortcuts"))
         .children(this.shortcutRows().map(([key, label], n) => h_flex().id(`shortcut-${n}`).h(26).gap(12).items_center()
