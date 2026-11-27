@@ -18,8 +18,27 @@ issue → linear-issue-update (me, In Development) → rebase → grill ✋ → 
 
 - ✋: the step waits for your yes.
 - Each step reads and extends the memory file `~/.herdr/workflows/<ID>.md`, and posts its result on the issue as a marked comment (`[grill]`, `[risk]`, `[spec]`, `[followup]`, `[recap]`); every Linear write goes through `sdlc-linear-issue-update`.
-- Only `workflow-linear-build`, `sdlc-grill` and `sdlc-linear-issue-update` are listed to Claude (their descriptions load every turn); the other steps are `disable-model-invocation: true` and read by path when the workflow reaches them.
+- Only the `workflow-*` skills, `sdlc-grill` and `sdlc-linear-issue-update` are listed to Claude (their descriptions load every turn); the other steps are `disable-model-invocation: true` and read by path when the workflow reaches them.
 - `sdlc-create-mr` needs the excalidraw mod (`./install-excalidraw.sh`) for `export_png`, and `rsvg-convert` (`brew install librsvg`).
+
+## workflow-idea
+
+The phase before: a rough idea, in any repo, to a decision.
+
+```
+idea → capture → grill ✋ → explore → options ✋ → technical doubt? → poc (worktree poc/<slug>, no MR)
+     → go / park / kill ✋
+         kill → why, in the memory file
+         park → Linear issue in Backlog
+         go   → Linear issue in Todo → hand off to workflow-linear-build
+     → cost → park or go: the memory file is deleted, the issue holds everything
+```
+
+Its memory file is `~/.herdr/ideas/<repo>/worktrees/<slug>.md`. It writes no spec: that stays in `workflow-linear-build`.
+
+## Steps
+
+A `sdlc-*` step does not know which workflow runs it: it reads the memory file the workflow names, does its part and writes its result (`sdlc-conventions`). Two workflows share a step as it is, or each has its own.
 
 ## Compaction
 

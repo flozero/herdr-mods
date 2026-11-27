@@ -10,7 +10,7 @@ After Sylvain's AI-SDLC, phase 2 (Build). Each step is a skill: Read its `~/.cla
 
 1. `sdlc-linear-issue-update`: assign to Florent, **In Development**.
 2. `sdlc-rebase`
-3. `sdlc-grill` ✋, then post its summary as `[grill]`.
+3. `sdlc-grill` ✋
 4. `sdlc-complexity` ✋
 5. Small and unambiguous (risk 0-1, one merge request): go to 8.
 6. `sdlc-to-spec` ✋
@@ -27,9 +27,4 @@ Done when the issue is Released, its `[recap]` posted, the worktrees removed and
 
 ## Conventions
 
-These hold in every `sdlc-*` skill.
-
-- Talk to Florent in French, short. Write in Linear and GitLab in English.
-- **Memory file** `~/.herdr/workflows/<ID>.md`: create it at step 1 (issue id, title, url, branch, worktree). Read it before a step; after it, add one line: what was decided, what the next steps need. It is how a step, a sub-agent or a session after a compaction knows where things are: never rely on the conversation for it.
-- Every Linear write goes through `sdlc-linear-issue-update`; each step's output is a comment with its marker, which later steps read back.
-- When Florent sends you back to a step, write his comment in the memory file and start again from that step.
+`~/.claude/skills/sdlc-conventions/SKILL.md`. The **memory file** is `~/.herdr/workflows/<ID>.md`: create it at step 1 (issue id, title, url, branch, worktree).

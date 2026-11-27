@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Build, lint, test
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 Run locally what the CI runs for these changes (`.gitlab-ci.yml`, `Makefile`, `package.json`, `pyproject.toml`): build, linters and formatters, type checker, the whole test suite. A failure from this change goes back to `sdlc-code`; one that fails on the default branch too is noted, not fixed.
 

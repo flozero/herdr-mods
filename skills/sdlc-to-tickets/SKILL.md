@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Sub-issues
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 Per merge request of `[spec]`, with `sdlc-linear-issue-update`: a sub-issue of `<ID>` with the merge request's title, its part of the spec (goal, criteria, files) as description, its risk label, assigned to Florent.
 

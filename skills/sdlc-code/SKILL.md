@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Code
 
-After Matt Pocock's `implement` and `tdd` skills (github.com/mattpocock/skills, MIT). Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+After Matt Pocock's `implement` and `tdd` skills (github.com/mattpocock/skills, MIT). Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 The spec is agreed: ask Florent nothing. Follow `~/.claude/skills/sdlc-florent-style/SKILL.md`.
 

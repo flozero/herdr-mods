@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Orchestrate
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 1. Per sub-issue, a worktree: `git worktree add --no-track -b <branch> <dir>/<branch slug> <base>`. The base is origin's default branch, or the branch below in a stack; `<dir>` is `worktrees.directory` in `~/.config/herdr-app/settings.json`, else `~/.herdr/worktrees/<repo>`.
 2. Per sub-issue, a sub-agent in its worktree, given the sub-issue id, its part of `[spec]`, the memory file's path, and "Follow `~/.claude/skills/sdlc-build-mr/SKILL.md`". Model by risk: Sonnet for 0-2, Opus for 3-4. A stack: each starts once the one below has its merge request. Independent ones: in parallel.

@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Merge request
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**. Follow `~/.claude/skills/sdlc-florent-tone/SKILL.md`.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`. Follow `~/.claude/skills/sdlc-florent-tone/SKILL.md`.
 
 1. **Schema**: draw what changed with the excalidraw MCP (`open_canvas` named `<ID>-mr`, `draw`): before and after, a flow, a call tree or files, small. `export_png`, then Read the PNG.
 2. **Description**, the repository's template first when it has one (`.gitlab/merge_request_templates/`), then:

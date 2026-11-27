@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Complexity and risk
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 From `[grill]` and the code it touches:
 

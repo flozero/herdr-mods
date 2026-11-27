@@ -7,7 +7,7 @@ argument-hint: "<ID> [merge request link]"
 
 # Watch the merge request
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 The dev agent's GitLab username is `devAgent` in `~/.herdr/workflows/config.json`; missing: ask Florent once, write it there.
 

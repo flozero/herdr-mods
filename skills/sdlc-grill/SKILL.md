@@ -8,7 +8,7 @@ argument-hint: "<ID or the request>"
 
 After Matt Pocock's `grilling` skill (github.com/mattpocock/skills, MIT). In French, in this terminal.
 
-Read the issue first (`get_issue`, `list_comments`). Map the problem as a **design tree**: each decision branches into the ones that hang off it (what is wrong, for whom, the expected result, what must not change, how we know it works, what is out of scope, how to do it).
+Read the memory file first, and the issue when there is one (`get_issue`, `list_comments`). Map the problem as a **design tree**: each decision branches into the ones that hang off it (what is wrong, for whom, the expected result, what must not change, how we know it works, what is out of scope, how to do it).
 
 Work it in **rounds**. The **frontier** is every decision whose prerequisites are settled: ask all of it in one round, numbered, each with your recommended answer, worded so "oui" accepts it, then wait:
 
@@ -22,4 +22,4 @@ Work it in **rounds**. The **frontier** is every decision whose prerequisites ar
 
 When the change touches infrastructure or the logic's flow, draw today and after with the excalidraw MCP (`open_canvas`, `draw`), small.
 
-Done when the frontier is empty and he confirms you understand it the same way. Then write **Problem**, **Expected result**, **Out of scope**, **Decisions** (one line each), the drawing's name, and get his yes. Inside `workflow-linear-build` the caller posts it as `[grill]`; alone, post it with `sdlc-linear-issue-update` when there is an issue.
+Done when the frontier is empty and he confirms you understand it the same way. Then write **Problem**, **Expected result**, **Out of scope**, **Decisions** (one line each), the drawing's name, and get his yes. Write it in the memory file; when there is an issue, post it as `[grill]` with `sdlc-linear-issue-update`.

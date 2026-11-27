@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Clean up
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 Each merge request deployed whose issue is **Released**: close its Herdr space, run the teardown (`worktrees.teardown`, the repo's `.herdr/settings.json`), `git worktree remove`. One with uncommitted or unpushed changes stays: say so. The worktree you run in goes last, after `sdlc-cost`.
 

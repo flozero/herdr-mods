@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Follow-ups
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 ✋ One line per item under **Follow-ups** in the memory file, with your recommendation: an issue, part of an open merge request, or nothing. Each one he keeps: an issue in the same team linking `<ID>`; all of them listed in `[followup]`.
 

@@ -7,7 +7,7 @@ argument-hint: "<ID or sub-issue ID>"
 
 # Build one merge request
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 In order: `sdlc-code`, `sdlc-review`, `sdlc-blt`, `sdlc-rebase`, `sdlc-create-mr`. What review or blt finds goes back to `sdlc-code`, then through them again.
 

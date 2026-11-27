@@ -7,7 +7,7 @@ argument-hint: "<ID>"
 
 # Review
 
-After Matt Pocock's `code-review` skill (github.com/mattpocock/skills, MIT). Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+After Matt Pocock's `code-review` skill (github.com/mattpocock/skills, MIT). Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 1. The diff: `git diff <base>...HEAD`, `git log <base>..HEAD --oneline`.
 2. Three sub-agents in parallel, fresh contexts, each given the diff command:

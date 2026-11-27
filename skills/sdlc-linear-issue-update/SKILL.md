@@ -1,12 +1,12 @@
 ---
 name: sdlc-linear-issue-update
-description: Write to Linear: a marked comment ([grill], [risk], [spec], [followup], [recap]), the status, the assignee, the risk-0..risk-4 and work-type labels, sub-issues. The one writer to Linear in the sdlc flow.
+description: Write to Linear: a new issue, a marked comment ([grill], [risk], [spec], [followup], [recap]), the status, the assignee, the risk-0..risk-4 and work-type labels, sub-issues. The one writer to Linear in the sdlc flow.
 argument-hint: "<ID> <what to change>"
 ---
 
 # Update the Linear issue
 
-Conventions: `~/.claude/skills/workflow-linear-build/SKILL.md`, **Conventions**.
+Conventions: `~/.claude/skills/sdlc-conventions/SKILL.md`.
 
 Linear goes through `node ~/.config/herdr-app/mods/linear/cli/linear-me.mjs call <tool> -` with the JSON on stdin in a quoted heredoc (`<<'EOF'`): this machine kills a `node` whose argument is about 1000 characters or more.
 
@@ -15,6 +15,7 @@ Linear goes through `node ~/.config/herdr-app/mods/linear/cli/linear-me.mjs call
 - **Assignee**: `save_issue` with `assignee: "me"`.
 - **Risk**: the single-select group `risk` with `risk-0` to `risk-4`. When the team lacks it (`list_issue_labels`, `team`, `includeGroups: true`), create it with `save_issue_label` (`isGroup: true`, `teamId`), then its labels (`parent: "risk"`; `#4ea7fc`, `#4cb782`, `#f2c94c`, `#f2994a`, `#eb5757`).
 - **Work type**: one label of the team's `type` group, only when the issue has none.
+- **Issue**: `list_issues` (`query`, `team`) for one that already covers it: there is one, stop and show it to Florent. Else `save_issue` (`team`, `title`, `description`, `state`), assigned to Florent.
 - **Sub-issue**: `save_issue` (`team`, `title`, `description`, `parentId`).
 
 Labels change with `addLabels` and `removeLabels`, never `labels` (it replaces them all).
