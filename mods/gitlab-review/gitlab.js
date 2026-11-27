@@ -8,7 +8,10 @@ const cacheDir = () => `${appHome()}/mods/gitlab-review/.cache`;
 
 async function glab(cwd, args) {
   const r = await exec("glab", args, { cwd });
-  if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim().split("\n").pop() || `glab exited with ${r.code}`);
+  if (r.code !== 0) {
+    const said = (r.stderr || r.stdout || "").split("\n").map((l) => l.trim()).filter((l) => l && l !== "ERROR").join(" ");
+    throw new Error(said || `glab exited with ${r.code}`);
+  }
   return r.stdout;
 }
 
@@ -105,7 +108,6 @@ export async function sidebar(cwd, projectPath, iid) {
     reviewers { nodes { id username name mergeRequestInteraction { reviewState approved } } }
     participants { nodes { username name } }
     labels { nodes { title color textColor description } }
-    milestone { title dueDate }
     approvalsLeft approvalsRequired
   } } }`, { p: projectPath, i: String(iid) });
   const m = d.project?.mergeRequest;
@@ -115,7 +117,6 @@ export async function sidebar(cwd, projectPath, iid) {
     reviewers: (m.reviewers?.nodes ?? []).map((r) => ({ id: r.id, username: r.username, name: r.name, state: r.mergeRequestInteraction?.reviewState ?? null, approved: Boolean(r.mergeRequestInteraction?.approved) })),
     participants: m.participants?.nodes ?? [],
     labels: m.labels?.nodes ?? [],
-    milestone: m.milestone ?? null,
     approvalsLeft: m.approvalsLeft ?? null,
     approvalsRequired: m.approvalsRequired ?? null,
   };
@@ -153,9 +154,10 @@ export async function mrStatus(cwd, projectPath, iids) {
   if (!iids.length) return {};
   const list = iids.map((i) => `"${Number(i)}"`).join(",");
   const d = await graphql(cwd, `query($p: ID!) { project(fullPath: $p) { mergeRequests(iids: [${list}], first: 100) { nodes {
-    iid headPipeline { status } approved approvalsLeft approvedBy { nodes { username } } conflicts } } } }`, { p: projectPath });
+    iid headPipeline { status path } approved approvalsLeft approvedBy { nodes { username } } conflicts } } } }`, { p: projectPath });
   return Object.fromEntries((d.project?.mergeRequests?.nodes ?? []).map((n) => [n.iid, {
     pipeline: n.headPipeline?.status?.toLowerCase() ?? null,
+    pipelinePath: n.headPipeline?.path ?? null,
     approved: Boolean(n.approved),
     left: n.approvalsLeft ?? 0,
     by: (n.approvedBy?.nodes ?? []).map((u) => u.username),
@@ -171,9 +173,7 @@ export const commits = (cwd, iid) => all(cwd, `projects/:id/merge_requests/${iid
 export const resolveDiscussion = (cwd, iid, discussionId, resolved) => send(cwd, "PUT", `${mrPath(iid)}/discussions/${discussionId}`, { resolved });
 export const setTitle = (cwd, iid, title) => send(cwd, "PUT", mrPath(iid), { title });
 export const setLabels = (cwd, iid, add, remove) => send(cwd, "PUT", mrPath(iid), { add_labels: add.join(","), remove_labels: remove.join(",") });
-export const setMilestone = (cwd, iid, milestoneId) => send(cwd, "PUT", mrPath(iid), { milestone_id: milestoneId ?? 0 });
 export const labels = (cwd, search) => get(cwd, `projects/:id/labels?per_page=30&search=${encodeURIComponent(search)}`);
-export const milestones = (cwd) => get(cwd, "projects/:id/milestones?state=active&include_ancestors=true&per_page=50");
 export const editNote = (cwd, iid, noteId, body) => send(cwd, "PUT", `${mrPath(iid)}/notes/${noteId}`, { body });
 export const deleteNote = (cwd, iid, noteId) => send(cwd, "DELETE", `${mrPath(iid)}/notes/${noteId}`);
 

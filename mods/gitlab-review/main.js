@@ -1,6 +1,6 @@
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, TextView, Popup } from "gpui-base";
-import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home, window as appWindow } from "herdr";
+import { theme, props, closeOverlay, openOverlay, run, focused, panes, spaces, terminals, hc, exec, nextCommand, appHome, home, knownAgents, window as appWindow } from "herdr";
 import * as fs from "fs/promises";
 import { createHash } from "crypto";
 import * as gl from "./gitlab.js";
@@ -12,6 +12,7 @@ import { editPoint, mentionAt, rankPeople, insertMention } from "./mention.js";
 import { branchCheckout, installedEditors, openIn, worktreeSetup, HERDR_EDITOR } from "./editor.js";
 import { agentArgv, agentName, askArgv } from "./agent.js";
 import { keyLabels } from "./kbd.js";
+import { stackTree } from "./stack.js";
 
 
 const MONO = "JetBrains Mono";
@@ -45,8 +46,12 @@ const DENY = [
   "Bash(git reset:*)", "Bash(git stash:*)", "Bash(git rebase:*)", "Bash(git merge:*)",
 ];
 const TABS = ["description", "changes", "comments", "review"];
-const LIST_TABS = ["mine", "review", "ignored", "merged", "person"];
-const LIST_LABEL = { mine: "Mine", review: "To review", ignored: "Ignored", merged: "Merged", person: "Someone" };
+const ICON = "mods/gitlab-review/icons";
+// The agents' colors, when Herdr's program table has none.
+const AGENT_COLOR = { claude: "#D97757", codex: "#10A37F", gemini: "#4285F4", opencode: "#A78BFA", cursor: "#38BDF8", aider: "#22C55E", amp: "#F472B6", other: "#60A5FA" };
+const LIST_TABS = ["review", "authored", "merged", "ignored"];
+const LIST_LABEL = { review: "To review", authored: "Authored", merged: "Recent merged", ignored: "Ignored" };
+const OLD_TABS = { mine: "authored", person: "authored" };
 const cacheDir = () => `${appHome()}/mods/gitlab-review/.cache`;
 const ignoredFile = () => `${cacheDir()}/ignored.json`;
 const seenFile = () => `${cacheDir()}/seen.json`;
@@ -159,8 +164,9 @@ export default class GitlabReview extends View {
     this.mrs = [];
     this.authored = [];
     this.someone = null;
-    this.someoneMrs = null;
+    this.theirs = {};
     this.stackParents = {};
+    this.folded = new Set();
     this.health = {};
     this.sel = 0;
     this.details = {};
@@ -230,6 +236,8 @@ export default class GitlabReview extends View {
     this.editors = null;
     this.editor = null;
     this.editorMenu = false;
+    this.actionsMenu = false;
+    this.composerMenu = null;
     this.split = false;
     this.listTab = "review";
     this.openingEditor = false;
@@ -275,66 +283,113 @@ export default class GitlabReview extends View {
     cx.notify();
   }
 
-  shownMrs() {
-    const q = this.q();
-    return q ? this.mrs.filter((m) => [`!${m.iid}`, m.title, m.author?.username, m.source_branch].some((x) => has(x, q))) : this.mrs;
-  }
-
   matches(m, q) {
     return [`!${m.iid}`, m.title, m.author?.username, m.source_branch].some((x) => has(x, q));
   }
 
-  listed() {
-    const shown = this.shownMrs();
+  // The list a filter reads, for me or for the person picked: null while it isn't loaded.
+  source(tab) {
+    const kind = tab === "ignored" ? "review" : tab;
+    if (this.someone) return this.theirs[kind] ?? null;
+    return kind === "review" ? this.mrs : kind === "authored" ? this.authored : this.merged;
+  }
+
+  rowsOf(tab) {
     const q = this.q();
-    if (this.listTab === "mine") return this.authored.filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, own: true }));
-    if (this.listTab === "ignored") return shown.filter((m) => this.ignored[m.iid]).map((m) => ({ m, ignored: true }));
-    if (this.listTab === "merged") return (this.merged ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false, merged: true }));
-    if (this.listTab === "person") return (this.someoneMrs ?? []).filter((m) => !q || this.matches(m, q)).map((m) => ({ m, ignored: false }));
-    const live = shown.filter((m) => !this.ignored[m.iid]);
+    const list = (this.source(tab) ?? []).filter((m) => !q || this.matches(m, q));
+    if (tab === "authored") return this.tree(list.map((m) => ({ m, ignored: false, own: true })));
+    if (tab === "merged") return this.tree(list.map((m) => ({ m, ignored: false, merged: true })));
+    if (tab === "ignored") return this.tree(list.filter((m) => this.ignored[m.iid]).map((m) => ({ m, ignored: true })));
+    const live = list.filter((m) => !this.ignored[m.iid]);
+    if (this.someone) return this.tree(live.map((m) => ({ m, ignored: false })));
     return [
-      ...live.filter((m) => this.replied[m.iid]).map((m) => ({ m, ignored: false, replied: true })),
-      ...live.filter((m) => !this.replied[m.iid]).map((m) => ({ m, ignored: false })),
+      ...this.tree(live.filter((m) => this.replied[m.iid]).map((m) => ({ m, ignored: false, replied: true }))),
+      ...this.tree(live.filter((m) => !this.replied[m.iid]).map((m) => ({ m, ignored: false }))),
     ];
   }
+
+  tree(rows) { return stackTree(rows, this.folded, this.baseBranch()); }
+
+  // Pipeline, approvals and conflicts of the merge requests of a list, 100 at a time (GraphQL's page).
+  async loadHealth(cx, list) {
+    const iids = [...new Set(list.map((m) => m.iid))];
+    if (!iids.length || !this.project) return;
+    const pages = [];
+    for (let i = 0; i < iids.length; i += 100) pages.push(iids.slice(i, i + 100));
+    const found = await Promise.all(pages.map((page) => this.call(cx, `health:${page[0]}`, () => gl.mrStatus(this.top, this.project.path_with_namespace, page))));
+    this.health = Object.assign({ ...this.health }, ...found.filter(Boolean));
+    cx.notify();
+  }
+
+  toggleFold(iid, cx, open = null) {
+    const folded = open === null ? !this.folded.has(iid) : !open;
+    if (folded === this.folded.has(iid)) return;
+    if (folded) this.folded.add(iid); else this.folded.delete(iid);
+    const at = this.listed().findIndex((x) => x.m.iid === iid);
+    if (at >= 0) this.sel = at;
+    this.anchor = null;
+    cx.notify();
+  }
+
+  // ← folds the stack under the selection (or goes up to its parent), → opens it.
+  foldKey(open, cx) {
+    const rows = this.listed(), x = rows[this.sel];
+    if (!x) return;
+    if (x.kids && x.folded === !open) { this.toggleFold(x.m.iid, cx, open); return; }
+    if (!open && x.depth > 0) {
+      for (let i = this.sel - 1; i >= 0; i--) if (rows[i].depth < x.depth) { this.sel = i; this.anchor = null; cx.notify(); return; }
+    }
+  }
+
+  listed() { return this.rowsOf(this.listTab); }
 
   async loadMerged(cx) {
     if (this.loading.has("merged")) return;
     const merged = await this.call(cx, "merged", () => gl.merged(this.top, this.user.username));
     if (!merged) return;
     this.merged = merged;
+    cx.spawn(async (cx) => this.loadHealth(cx, merged));
     const mine = await this.call(cx, "summary-merged", () => gl.reviewSummary(this.top, this.project.path_with_namespace, merged.map((m) => m.iid), this.user.username));
     if (mine) this.mine = { ...mine, ...this.mine };
     cx.notify();
   }
 
-  async loadPerson(cx) {
+  // One list of the person picked: to review, authored or merged.
+  async loadTheirs(cx, kind) {
     const who = this.someone?.username;
-    if (!who || this.loading.has("person")) return;
-    const mrs = await this.call(cx, "person", () => gl.authored(this.top, who));
-    if (!mrs || this.someone?.username !== who) return;
-    this.someoneMrs = mrs;
-    await this.loadParents(cx, mrs);
+    const label = `their-${kind}`;
+    if (!who || !this.user || this.loading.has(label)) return;
+    const fetch = { review: gl.reviewing, authored: gl.authored, merged: gl.merged }[kind];
+    const list = await this.call(cx, label, () => fetch(this.top, who));
+    if (!list || this.someone?.username !== who) return;
+    this.theirs = { ...this.theirs, [kind]: list };
     cx.notify();
+    await Promise.all([this.loadHealth(cx, list), this.loadParents(cx, list)]);
+    cx.notify();
+  }
+
+  // Loads what the current filter shows if it isn't there yet.
+  ensureList(cx) {
+    if (!this.user || this.source(this.listTab) !== null) return;
+    if (this.someone) cx.spawn(async (cx) => this.loadTheirs(cx, this.listTab === "ignored" ? "review" : this.listTab));
+    else cx.spawn(async (cx) => this.loadMerged(cx));
   }
 
   pickAuthor(u, cx) {
     this.closePeople(cx);
-    if (this.someone?.username !== u.username) {
-      this.someone = { username: u.username, name: u.name };
-      this.someoneMrs = null;
-      this.sel = 0;
-      this.anchor = null;
-      cx.spawn(async (cx) => this.loadPerson(cx));
-    }
-    if (this.listTab !== "person") this.setListTab("person", cx);
-    else this.savePrefs(cx);
+    const who = u.username === this.user?.username ? null : { username: u.username, name: u.name };
+    if ((who?.username ?? null) === (this.someone?.username ?? null)) return;
+    this.someone = who;
+    this.theirs = {};
+    this.sel = 0;
+    this.anchor = null;
+    this.ensureList(cx);
+    cx.notify();
   }
 
   choosePerson(kind, u, cx) {
     if (kind === "author") this.pickAuthor(u, cx);
     else if (kind === "labels") this.toggleLabel(u, cx);
-    else if (kind === "milestone") this.pickMilestone(u, cx);
     else this.togglePerson(kind, u, cx);
   }
 
@@ -343,16 +398,18 @@ export default class GitlabReview extends View {
   }
 
   async loadEditors(cx) {
-    const [found, saved, prefs, herdrEditor] = await Promise.all([installedEditors(exec).catch(() => []), this.readStore(editorFile()), this.readStore(prefsFile()),
-      herdrEditorMod()]);
+    const [found, saved, prefs, herdrEditor, agents] = await Promise.all([installedEditors(exec).catch(() => []), this.readStore(editorFile()), this.readStore(prefsFile()),
+      herdrEditorMod(), knownAgents().catch(() => [])]);
+    const bin = agentArgv(this.config)[0].split("/").pop();
+    this.agentProgram = agents.find((a) => a.key === bin || String(a.run?.[0] ?? "").split("/").pop() === bin) ?? null;
     this.herdrEditor = herdrEditor;
     const editors = herdrEditor ? [HERDR_EDITOR, ...found] : found;
     this.editors = editors;
     this.editor = saved.app ?? null;
     this.split = Boolean(prefs.split);
-    if (LIST_TABS.includes(prefs.listTab)) this.listTab = prefs.listTab;
-    if (prefs.someone?.username) this.someone = prefs.someone;
-    if (this.listTab === "person" && this.user && this.someone && this.someoneMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
+    const tab = OLD_TABS[prefs.listTab] ?? prefs.listTab;
+    if (LIST_TABS.includes(tab)) this.listTab = tab;
+    this.ensureList(cx);
     cx.notify();
   }
 
@@ -363,7 +420,7 @@ export default class GitlabReview extends View {
   }
 
   savePrefs(cx) {
-    const prefs = { split: this.split, listTab: this.listTab, someone: this.someone };
+    const prefs = { split: this.split, listTab: this.listTab };
     cx.spawn(async (cx) => {
       try {
         await exec("sh", ["-c", 'mkdir -p "$1" && chmod 700 "$1"', "sh", cacheDir()]);
@@ -377,40 +434,45 @@ export default class GitlabReview extends View {
     this.listTab = tab;
     this.sel = 0;
     this.anchor = null;
-    if (tab === "merged" && this.merged === null && this.user) cx.spawn(async (cx) => this.loadMerged(cx));
-    if (tab === "person" && this.user) {
-      if (!this.someone) this.openPeople("author", cx);
-      else if (this.someoneMrs === null) cx.spawn(async (cx) => this.loadPerson(cx));
-    }
+    this.ensureList(cx);
     this.savePrefs(cx);
     cx.notify();
   }
 
-  listCounts() {
-    const q = this.q();
-    const shown = this.shownMrs();
-    return {
-      mine: this.authored.filter((m) => !q || this.matches(m, q)).length,
-      review: shown.filter((m) => !this.ignored[m.iid]).length,
-      ignored: shown.filter((m) => this.ignored[m.iid]).length,
-      merged: this.merged ? this.merged.filter((m) => !q || this.matches(m, q)).length : null,
-      person: this.someoneMrs ? this.someoneMrs.filter((m) => !q || this.matches(m, q)).length : null,
-    };
-  }
-
   listTabs(t) {
-    const counts = this.listCounts();
-    return h_flex().h(36).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
+    return h_flex().px(12).py(8).gap(8).flex_none().flex_wrap().items_center().border_b(1).border_color(t.border)
+      .child(this.whoButton(t))
+      .child(this.findBox(t, "Search  /"))
+      .child(div().w(1).h(18).mx(2).bg(t.border))
       .children(LIST_TABS.map((tab, n) => {
         const on = this.listTab === tab;
-        const count = tab === "merged" && counts.merged === null ? (this.loading.has("merged") ? "…" : "last 30")
-          : tab === "person" ? (this.someone ? `@${this.someone.username}${counts.person === null ? "" : ` · ${counts.person}`}` : "pick")
-          : String(counts[tab]);
+        const count = this.source(tab) === null ? (tab === "merged" ? "last 30" : "…") : String(this.rowsOf(tab).length);
         return h_flex().id(`lt-${tab}`).h(24).px(10).gap(6).items_center().rounded(12).border_1().text_size(12).cursor_pointer()
           .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.popover).text_color(on ? t.foreground : t.muted)
           .on_mouse_down("left", stop).on_click((_e, cx) => this.setListTab(tab, cx))
           .child(`${n + 1}  ${LIST_LABEL[tab]}`).child(div().text_size(10.5).text_color(t.dim).child(count));
       }));
+  }
+
+  // Whose merge requests the list shows: me by default.
+  whoButton(t) {
+    const open = this.peoplePick?.kind === "author" && !this.iid;
+    const name = this.someone?.name ?? this.user?.name ?? "Me";
+    return h_flex().id("who").h(28).px(10).gap(6).flex_none().items_center().rounded(8).border_1()
+      .border_color(open || this.someone ? t.accent : t.border).bg(open ? t.selected : t.background).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+      .on_click((_e, cx) => this.openPeople("author", cx))
+      .child(svg(`${ICON}/person.svg`).size(14).flex_none().text_color(this.someone ? t.accent : t.muted))
+      .child(div().max_w(180).truncate().text_size(12).child(this.someone ? name : `${name} (me)`))
+      .child(div().text_size(10).text_color(t.dim).child("▾"));
+  }
+
+  // The people dropdown under the button: a press outside closes it.
+  whoPop(t) {
+    return div().absolute().inset_0()
+      .child(div().id("who-back").absolute().inset_0().on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.closePeople(cx); }))
+      .child(div().id("who-panel").absolute().top(82).left(12).w(300).on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
+        .child(div().rounded(8).shadow_lg().child(this.peoplePicker(t))));
   }
 
   openStackBranch(m, cx) {
@@ -479,7 +541,30 @@ export default class GitlabReview extends View {
 
   toggleEditorMenu(cx) {
     this.editorMenu = !this.editorMenu;
+    this.actionsMenu = false;
     cx.notify();
+  }
+
+  toggleActionsMenu(cx) {
+    this.actionsMenu = !this.actionsMenu;
+    this.editorMenu = false;
+    this.composerMenu = null;
+    cx.notify();
+  }
+
+  toggleComposerMenu(name, cx) {
+    this.composerMenu = this.composerMenu === name ? null : name;
+    this.actionsMenu = false;
+    this.editorMenu = false;
+    cx.notify();
+  }
+
+  // An entry of a dropdown closes it before it runs.
+  runAction(action, cx) {
+    this.actionsMenu = false;
+    this.composerMenu = null;
+    cx.notify();
+    action(cx);
   }
 
   openEditor(app, cx) {
@@ -642,6 +727,7 @@ export default class GitlabReview extends View {
   }
 
   ignorePicked(cx) {
+    if (this.someone) { this.say("Ignore works on your own list: pick yourself first (p)", cx); return; }
     const rows = this.picked().filter((x) => !x.merged && !x.own);
     if (rows.length < 2) { if (rows[0]) this.toggleIgnore(rows[0].m.iid, cx); this.anchor = null; return; }
     const on = rows.some((x) => !x.ignored);
@@ -740,7 +826,7 @@ export default class GitlabReview extends View {
       this.call(cx, "project", () => gl.project(this.top)),
       this.call(cx, "user", () => gl.me(this.top)),
     ]);
-    if (!project || !user) return;
+    if (!project || !user) { this.fail(`${project ? "" : "Not a GitLab project: "}${this.status?.text ?? "GitLab didn't answer"}`, cx); return; }
     this.project = project;
     this.user = user;
     await this.loadStores();
@@ -902,7 +988,7 @@ export default class GitlabReview extends View {
     this.draft.set_value("");
     this.target = GENERAL;
     this.saveNotes(cx);
-    if (!quiet) this.say(`Added to your review: ${this.notes.length} pending · a sends it to ${this.agentName()}${this.remote ? ", or Post on GitLab" : ""}`, cx, "success");
+    if (!quiet) this.say(`Added to your review: ${this.notes.length} pending · a sends it to ${this.agentName()}${this.remote ? ", or Send to › GitLab" : ""}`, cx, "success");
     cx.notify();
   }
 
@@ -911,7 +997,7 @@ export default class GitlabReview extends View {
     if (!d) return;
     if (!this.discardAsked || Date.now() - this.discardAsked > 3000) {
       this.discardAsked = Date.now();
-      this.say("Press Discard all again to cancel every pending comment", cx);
+      this.say("Choose Discard again within 3 seconds to cancel every pending comment", cx);
       return;
     }
     this.discardAsked = 0;
@@ -1028,14 +1114,15 @@ export default class GitlabReview extends View {
     cx.timer.after(CALL_LIMIT, (cx) => {
       if (!this.loading.has(label) || this.started[label] !== started) return;
       this.loading.delete(label);
-      this.say(`GitLab didn't answer in ${CALL_LIMIT / 1000} s (${label.split(":")[0]}): ⌘R to try again`, cx, "error");
+      this.status = { text: `GitLab didn't answer in ${CALL_LIMIT / 1000} s (${label.split(":")[0]}): ⌘R to try again`, level: "error", label };
+      cx.notify();
     });
     try {
       const r = await fn();
-      if (this.status?.level === "error") this.status = null;
+      if (this.status?.label === label) this.status = null;
       return r;
     } catch (e) {
-      this.status = { text: String(e?.message ?? e), level: "error" };
+      this.status = { text: String(e?.message ?? e), level: "error", label };
       return undefined;
     } finally {
       this.loading.delete(label);
@@ -1060,6 +1147,12 @@ export default class GitlabReview extends View {
       });
       return;
     }
+    if (!this.user) {
+      this.status = null;
+      this.say("Connecting to GitLab…", cx);
+      cx.spawn(async (cx) => this.start(cx));
+      return;
+    }
     const iid = this.iid;
     this.say(iid ? `Reloading !${iid}…` : "Refreshing the list…", cx);
     cx.spawn(async (cx) => {
@@ -1074,11 +1167,8 @@ export default class GitlabReview extends View {
       this.call(cx, "mrs", () => gl.reviewing(this.top, this.user.username)),
       this.call(cx, "authored", () => gl.authored(this.top, this.user.username)),
     ]);
-    if (authored) {
-      this.authored = authored;
-      const health = await this.call(cx, "health", () => gl.mrStatus(this.top, this.project.path_with_namespace, authored.map((m) => m.iid)));
-      if (health) this.health = health;
-    }
+    if (authored) this.authored = authored;
+    await this.loadHealth(cx, [...(mrs ?? []), ...(authored ?? [])]);
     if (mrs) {
       this.mrs = mrs;
       this.sel = Math.min(this.sel, Math.max(0, mrs.length - 1));
@@ -1096,7 +1186,7 @@ export default class GitlabReview extends View {
       await this.findReplies(cx, mrs);
     }
     if (this.merged !== null) await this.loadMerged(cx);
-    if (this.someoneMrs !== null) await this.loadPerson(cx);
+    if (this.someone) await Promise.all(Object.keys(this.theirs).map((kind) => this.loadTheirs(cx, kind)));
     if (this.iid) await this.loadMr(cx, this.iid);
   }
 
@@ -1104,9 +1194,6 @@ export default class GitlabReview extends View {
     return this.project?.default_branch ?? "master";
   }
 
-  stackedOn(m) {
-    return new Set([...this.mrs, ...this.authored].filter((x) => x.target_branch === m.source_branch && x.iid !== m.iid).map((x) => x.iid)).size;
-  }
 
   async loadParents(cx, mrs) {
     const branches = [...new Set(mrs.map((m) => m.target_branch))].filter((b) => b && b !== this.baseBranch() && !(b in this.stackParents));
@@ -1161,33 +1248,6 @@ export default class GitlabReview extends View {
       d.rulesFiles = d.files;
     }
     return d.rulesMatch;
-  }
-
-  rulesPrompt(d) {
-    const matches = this.rulesFor(d);
-    const mr = d.mr;
-    const head = [
-      `Review merge request !${mr.iid} against the team review rules below.`,
-      `Read the changes with \`glab mr diff ${mr.iid}\`, and whole files with \`git fetch origin ${safeBranch(mr.source_branch)}\` then \`git show origin/${safeBranch(mr.source_branch)}:<path>\`.`,
-      "For each rule, list every violation as `- path:line: <rule title>: why`, then cite the rule page. Write `No violations` for a rule with none. Findings only, no summary.",
-      "Rules in mode `subagent` deserve their own sub-agent if you can run one.",
-      "Do not post anything to GitLab: I add the findings I keep myself.",
-    ];
-    const body = matches.map(({ rule, globs, files }) => [
-      `## ${rule.page_title}${rule.page_url ? ` (${rule.page_url})` : ""}`,
-      `Mode: ${rule.mode}. Applies to: ${globs.join(", ")}. Files here: ${files.join(", ")}`,
-      "",
-      rule.body,
-    ].join("\n"));
-    return [...head, "", ...body].join("\n");
-  }
-
-  reviewRules(cx) {
-    const d = this.details[this.iid];
-    if (!d) return;
-    if (!this.rules) { this.say(this.rulesError ? `Review rules unavailable: ${this.rulesError}` : "Review rules are still loading", cx, "error"); return; }
-    if (!this.rulesFor(d).length) { this.say("No team review rule applies to the files of this merge request", cx); return; }
-    this.askClaude(cx, d, this.rulesPrompt(d), `Asked ${this.agentName()} to review against the rules`);
   }
 
   async findReplies(cx, mrs) {
@@ -1698,9 +1758,9 @@ export default class GitlabReview extends View {
     if (this.peoplePick?.kind === kind) { this.closePeople(cx); return; }
     this.peoplePick = { kind, sel: 0, found: null };
     this.peopleInput.set_value("");
-    if (kind === "labels" || kind === "milestone") {
+    if (kind === "labels") {
       cx.spawn(async (cx) => {
-        const list = await (kind === "labels" ? gl.labels(this.top, "") : gl.milestones(this.top)).catch(() => null);
+        const list = await gl.labels(this.top, "").catch(() => null);
         if (this.peoplePick?.kind !== kind || !Array.isArray(list)) return;
         this.peoplePick.found = list.map((x) => ({ id: x.id, title: x.title ?? x.name, color: x.color, textColor: x.text_color }));
         cx.notify();
@@ -1719,7 +1779,7 @@ export default class GitlabReview extends View {
   peopleChoices() {
     const p = this.peoplePick;
     if (p?.kind === "author") return this.authorChoices(p);
-    if (p?.kind === "labels" || p?.kind === "milestone") return this.tagChoices(p);
+    if (p?.kind === "labels") return this.tagChoices(p);
     const s = this.details[this.iid]?.side;
     if (!p || !s) return [];
     const on = new Set(s[p.kind].map((u) => u.username));
@@ -1737,8 +1797,8 @@ export default class GitlabReview extends View {
     const s = this.details[this.iid]?.side;
     if (!s) return [];
     const q = this.peopleInput.value().trim().toLowerCase();
-    const on = new Set(p.kind === "labels" ? s.labels.map((l) => l.title) : s.milestone ? [s.milestone.title] : []);
-    const current = p.kind === "labels" ? s.labels.map((l) => ({ title: l.title, color: l.color, textColor: l.textColor })) : [];
+    const on = new Set(s.labels.map((l) => l.title));
+    const current = s.labels.map((l) => ({ title: l.title, color: l.color, textColor: l.textColor }));
     const seen = new Set();
     return [...current, ...(p.found ?? [])].filter((x) => x.title && !seen.has(x.title) && seen.add(x.title))
       .filter((x) => !q || x.title.toLowerCase().includes(q))
@@ -1764,32 +1824,16 @@ export default class GitlabReview extends View {
     });
   }
 
-  pickMilestone(u, cx) {
-    const mr = this.draftable(), d = this.details[this.iid];
-    if (!mr || !d?.side) return;
-    const before = d.side;
-    d.side = { ...d.side, milestone: u.on ? null : { title: u.title } };
-    this.closePeople(cx);
-    this.say(u.on ? `Milestone ${u.title} removed` : `Milestone set to ${u.title}`, cx, "success");
-    cx.spawn(async (cx) => {
-      try {
-        await gl.setMilestone(this.top, mr.iid, u.on ? null : u.id);
-      } catch (e) {
-        d.side = before;
-        this.say(`Couldn't change the milestone of !${mr.iid}: ${e?.message ?? e}`, cx, "error");
-        cx.notify();
-      }
-    });
-  }
-
   authorChoices(p) {
     const q = this.peopleInput.value().trim().toLowerCase();
-    const near = [...(this.someone ? [this.someone] : []), ...[...this.mrs, ...this.authored, ...(this.merged ?? [])].flatMap((m) => [m.author, ...(m.reviewers ?? [])])];
-    const pool = q && p.found ? [...p.found, ...near] : near;
-    const seen = new Set([this.user?.username]);
+    const around = [...this.mrs, ...this.authored, ...(this.merged ?? []), ...Object.values(this.theirs).flat()];
+    const near = [...(this.someone ? [this.someone] : []), ...around.flatMap((m) => [m.author, ...(m.reviewers ?? [])])];
+    const pool = [...(this.user ? [this.user] : []), ...(q && p.found ? p.found : []), ...near];
+    const seen = new Set();
+    const picked = this.someone?.username ?? this.user?.username;
     return pool.filter((u) => u?.username && !seen.has(u.username) && seen.add(u.username))
       .filter((u) => !q || `${u.username} ${u.name ?? ""}`.toLowerCase().includes(q))
-      .map((u) => ({ username: u.username, name: u.name ?? u.username, on: u.username === this.someone?.username }))
+      .map((u) => ({ username: u.username, name: u.username === this.user?.username ? `${u.name ?? u.username} (me)` : u.name ?? u.username, on: u.username === picked }))
       .slice(0, 12);
   }
 
@@ -1805,7 +1849,6 @@ export default class GitlabReview extends View {
       if (gen !== this.peopleGen) return;
       cx.spawn(async (cx) => {
         const kind = this.peoplePick?.kind;
-        if (kind === "milestone") return;
         const list = await (kind === "labels" ? gl.labels(this.top, q) : gl.users(this.top, q)).catch(() => null);
         if (gen !== this.peopleGen || this.peoplePick?.kind !== kind || !Array.isArray(list)) return;
         this.peoplePick.found = kind === "labels"
@@ -1878,7 +1921,7 @@ export default class GitlabReview extends View {
 
   peoplePicker(t) {
     const p = this.peoplePick, list = this.peopleChoices(), sel = Math.min(p.sel, list.length - 1);
-    const tags = p.kind === "labels" || p.kind === "milestone";
+    const tags = p.kind === "labels";
     const q = this.peopleInput.value().trim();
     return v_flex().w_full().gap(1).p(4).rounded(8).border_1().border_color(t.border).bg(t.popover)
       .child(h_flex().h(28).px(8).mb(2).items_center().rounded(6).border_1().border_color(this.peopleFocused ? t.accent : t.border).bg(t.background)
@@ -1891,14 +1934,7 @@ export default class GitlabReview extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(u.username === this.user?.username ? t.accent : t.foreground).child(u.name))
         .when(!tags, (el) => el.child(div().flex_none().max_w(90).truncate().text_size(10.5).text_color(t.dim).child(`@${u.username}`)))))
       .when(!list.length, (el) => el.child(div().px(6).py(4).text_size(11.5).text_color(t.dim).child(tags ? (p.found ? "Nothing matches" : "Loading…") : q.length < 2 ? "Type a name" : "Nobody matches")))
-      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child(p.kind === "author" ? "↑↓ choose · Enter show their open merge requests · Esc close" : p.kind === "milestone" ? "↑↓ choose · Enter set or remove · Esc close" : "↑↓ choose · Enter add or remove · Esc close"));
-  }
-
-  draftButton(t) {
-    const mr = this.draftable();
-    if (!mr) return null;
-    const label = this.drafting ? "Saving…" : this.isDraft(mr) ? "Mark as ready  ⇧D" : "Mark as draft  ⇧D";
-    return this.button(t, "h-draft", label, (cx) => this.toggleDraft(cx), false, !this.drafting);
+      .child(div().px(6).pt(2).text_size(10.5).text_color(t.dim).child(p.kind === "author" ? "↑↓ choose · Enter show their merge requests · Esc close" : "↑↓ choose · Enter add or remove · Esc close"));
   }
 
   statePill(t, mr) {
@@ -1996,15 +2032,14 @@ export default class GitlabReview extends View {
     this.say(`Asking ${this.agentName()} to rebase ${mr.source_branch}…`, cx);
     cx.spawn(async (cx) => {
       try {
-        if (this.local) await this.handToClaude(text, cx);
-        else {
-          const { path, created, main } = await branchCheckout(exec, this.top, mr.source_branch, home());
-          if (created && path !== main) await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: mr.source_branch });
-          const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", `rebase-${mr.iid}-${Date.now().toString(36)}`, "--cwd", path, "--", ...agentArgv(this.config), text]);
-          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-          await this.showRight(cx, JSON.parse(r.stdout).address);
+        let path = this.top;
+        if (!this.local) {
+          const out = await branchCheckout(exec, this.top, mr.source_branch, home());
+          if (out.created && out.path !== out.main) await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main: out.main, path: out.path, branch: mr.source_branch });
+          path = out.path;
         }
-        this.say(`${this.agentName()} is rebasing ${mr.source_branch}, on the right`, cx, "success");
+        const where = await this.sendToAgent(cx, path, text, `Rebase · ${path.split("/").pop()}`);
+        this.say(`${this.agentName()} is rebasing ${mr.source_branch}, ${where}`, cx, "success");
       } catch (e) {
         this.say(`Couldn't ask for the rebase: ${e?.message ?? e}`, cx, "error");
       } finally {
@@ -2012,6 +2047,43 @@ export default class GitlabReview extends View {
         cx.notify();
       }
     });
+  }
+
+  // Sends the text to an agent already open on the folder (this tab's first), else opens a tab with one there.
+  async sendToAgent(cx, path, text, name) {
+    const here = focused()?.tab;
+    const on = panes().filter((p) => p.terminal && p.program?.agent && (p.cwd === path || String(p.cwd ?? "").startsWith(`${path}/`)));
+    const pane = on.find((p) => p.tab === here) ?? on[0];
+    if (pane) {
+      const r = await hc(["send", pane.terminal, text]);
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || "hc send failed");
+      if (pane.tab === here) return "in the pane of this tab";
+      const space = spaces().find((x) => x.tabs.some((tab) => tab.id === pane.tab));
+      if (space) run("space.select", { id: space.id });
+      run("tab.select", { id: pane.tab });
+      run("pane.focus", { terminal: pane.terminal });
+      return "in its tab";
+    }
+    let space = spaces().find((x) => x.folder === path);
+    if (!space) {
+      run("space.new", { folder: path, name: path.split("/").pop(), focus: false });
+      for (let i = 0; i < 40 && !(space = spaces().find((x) => x.folder === path)); i++) await this.wait(cx, 50);
+    }
+    run("tab.new", { name, folder: path, argv: agentArgv(this.config), task: text, focus: true, ...(space ? { space: space.id } : {}) });
+    return "in a new tab";
+  }
+
+  // A button that hands work to the agent: its icon, in its color.
+  agentButton(t, id, label, action, enabled = true) {
+    const bin = agentArgv(this.config)[0].split("/").pop(), prog = this.agentProgram;
+    const color = prog?.color ?? AGENT_COLOR[prog?.key ?? bin] ?? AGENT_COLOR.other;
+    const icon = prog?.icon ?? (bin === "claude" ? "icons/claude.svg" : "icons/agent.svg");
+    return h_flex().id(id).h(26).px(10).gap(6).flex_none().items_center().rounded(6).border_1().border_color(color).bg(t.popover).text_size(12)
+      .when(!enabled, (el) => el.opacity(0.5))
+      .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_click((_e, cx) => action(cx)))
+      .on_mouse_down("left", stop)
+      .child(svg(icon).size(14).flex_none().text_color(color))
+      .child(label);
   }
 
   async handToClaude(text, cx) {
@@ -2115,6 +2187,8 @@ export default class GitlabReview extends View {
     const k = e.keystroke.replace(/(^|-)fn-/, "$1");
     if (k === "cmd-r" || k === "ctrl-r") { this.reload(cx); cx.stop_propagation(); return; }
     if (this.editorMenu && k === "escape") { this.toggleEditorMenu(cx); cx.stop_propagation(); return; }
+    if (this.actionsMenu && k === "escape") { this.toggleActionsMenu(cx); cx.stop_propagation(); return; }
+    if (this.composerMenu && k === "escape") { this.toggleComposerMenu(this.composerMenu, cx); cx.stop_propagation(); return; }
     if (k === "ctrl-/" || (this.shortcuts && k === "escape")) { this.toggleShortcuts(cx); cx.stop_propagation(); return; }
     if (this.peopleFocused || (this.peoplePick && k === "escape")) {
       if (this.peopleKey(k, cx)) cx.stop_propagation();
@@ -2122,6 +2196,7 @@ export default class GitlabReview extends View {
     }
     if (this.searchFocused) {
       if (k === "escape") { this.closeSearch(cx); cx.stop_propagation(); }
+      else if ((k === "down" || k === "up") && !this.iid) { const n = this.listed().length; this.anchor = null; this.sel = Math.max(0, Math.min(n - 1, this.sel + (k === "down" ? 1 : -1))); cx.notify(); cx.stop_propagation(); }
       else if (k === "down" || k === "up") { this.handle.focus(); cx.notify(); }
       return;
     }
@@ -2197,11 +2272,12 @@ export default class GitlabReview extends View {
       up: () => { this.anchor = null; this.sel = Math.max(0, this.sel - 1); cx.notify(); },
       "shift-down": () => this.extend(1, cx),
       "shift-up": () => this.extend(-1, cx),
+      left: () => this.foldKey(false, cx),
+      right: () => this.foldKey(true, cx),
       enter: () => shown[this.sel] && this.open(shown[this.sel].m.iid, cx),
       i: () => this.ignorePicked(cx),
       m: () => this.toggleMerged(cx),
-      1: () => this.setListTab("mine", cx), 2: () => this.setListTab("review", cx), 3: () => this.setListTab("ignored", cx), 4: () => this.setListTab("merged", cx),
-      5: () => this.setListTab("person", cx),
+      1: () => this.setListTab(LIST_TABS[0], cx), 2: () => this.setListTab(LIST_TABS[1], cx), 3: () => this.setListTab(LIST_TABS[2], cx), 4: () => this.setListTab(LIST_TABS[3], cx),
       p: () => this.openPeople("author", cx),
       tab: () => this.setListTab(LIST_TABS[(LIST_TABS.indexOf(this.listTab) + 1) % LIST_TABS.length], cx),
       "shift-tab": () => this.setListTab(LIST_TABS[(LIST_TABS.indexOf(this.listTab) + LIST_TABS.length - 1) % LIST_TABS.length], cx),
@@ -2445,16 +2521,16 @@ export default class GitlabReview extends View {
     const root = v_flex().id("glr-root").relative().size_full().min_h(0).bg(t.popover).text_size(13).text_color(t.foreground)
       .track_focus(this.handle)
       .on_mouse_down("left", (_e, cx) => {
-        if (this.editorMenu) { this.editorMenu = false; cx.notify(); }
+        if (this.editorMenu || this.actionsMenu || this.composerMenu) { this.editorMenu = false; this.actionsMenu = false; this.composerMenu = null; cx.notify(); }
         if (!this.composing && !this.searchFocused) this.handle.focus();
       })
       .on_key_down((e, cx) => this.onKey(e, cx));
     const d = this.iid ? this.details[this.iid] : null;
     return root.child(this.header(t, d))
       .when(!this.iid && Boolean(this.user), (el) => el.child(this.listTabs(t)))
-      .when(!this.iid && (this.searchOpen || Boolean(this.query)), (el) => el.child(this.searchBar(t, this.listed().length, this.mrs.length + this.authored.length + (this.merged?.length ?? 0))))
       .child(this.iid ? this.mrView(t, d) : this.listView(t))
       .child(this.footer(t))
+      .when(!this.iid && this.peoplePick?.kind === "author", (el) => el.child(this.whoPop(t)))
       .when(Boolean(this.toastText), (el) => el.child(this.toastView(t)))
       .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsModal(t)));
   }
@@ -2467,23 +2543,8 @@ export default class GitlabReview extends View {
           .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(`!${this.remote.iid}`, cx)).child(`!${this.remote.iid}`)
         : div().text_size(14).font_semibold().child("Branch"))
       .child(d && this.remote ? this.titleView(t, d.mr.title) : div().flex_1().min_w(0).truncate().child(d ? this.top.split("/").pop() : this.top ?? ""))
-      .when(busy, (el) => el.child(div().text_size(11).text_color(t.dim).child("loading…")))
-      .when(!d, (el) => el.child(this.button(t, "h-search", "Search  ⌘F", (cx) => this.openSearch(cx)))
-        .child(this.button(t, "h-refresh", "↻  ⌘R", (cx) => this.reload(cx))));
-  }
-
-  localBar(t) {
-    const typed = this.draft.value().trim();
-    const n = this.notes.length + (typed ? 1 : 0);
-    return h_flex().h(40).flex_none().px(16).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(div().text_size(12).font_semibold().child("Your review"))
-      .when(this.notes.length > 0, (el) => el.child(this.chip(t, `${this.notes.length} pending`, t.accent)))
-      .when(Boolean(typed), (el) => el.child(this.chip(t, "+ the text below", t.accent)))
-      .child(div().flex_1())
-      .when(this.sending, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Sending…")))
-      .when(this.notes.length > 0, (el) => el.child(this.button(t, "lc-discard", "Discard all", (cx) => this.discard(cx), false, !this.sending)))
-      .when(Boolean(this.remote), (el) => el.child(this.button(t, "lc-post", n ? `Post ${n} on GitLab` : "Post on GitLab", (cx) => this.postNotes(cx), false, n > 0 && !this.sending)))
-      .child(this.button(t, "lc-send", n ? `Send ${n} to ${this.agentName()}  a` : `Send to ${this.agentName()}  a`, (cx) => this.sendLocal(cx), true, n > 0 && !this.sending));
+      .when(busy, (el) => el.child(this.spinner(t)))
+      .when(!d, (el) => el.child(this.iconButton(t, "h-refresh", "↻", (cx) => this.reload(cx))));
   }
 
   header(t, d) {
@@ -2496,17 +2557,78 @@ export default class GitlabReview extends View {
         .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(`!${this.iid}`, cx)).child(`!${this.iid}`)))
       .when(Boolean(d), (el) => el.child(this.titleView(t, d.mr.title)))
       .when(!d, (el) => el.child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(this.project?.path_with_namespace ?? "")))
-      .when(busy, (el) => el.child(div().text_size(11).text_color(t.dim).child("loading…")))
+      .when(busy, (el) => el.child(this.spinner(t)))
       .when(Boolean(d) && Boolean(this.ignored[this.iid]), (el) => el.child(this.chip(t, "ignored")))
-      .when(!d, (el) => el.child(this.button(t, "h-search", "Search  ⌘F", (cx) => this.openSearch(cx)))
-        .child(this.button(t, "h-refresh", "↻  ⌘R", (cx) => this.reload(cx))))
-      .when(Boolean(props()?.overlay), (el) => el.child(this.button(t, "h-close", "×", () => this.dismiss())));
+      .when(!d, (el) => el.child(this.iconButton(t, "h-refresh", "↻", (cx) => this.reload(cx))))
+      .when(Boolean(props()?.overlay), (el) => el.child(this.iconButton(t, "h-close", svg(`${ICON}/close.svg`).size(13), () => this.dismiss())));
   }
 
-  editorButton(t, anchor = "top_right") {
-    const trigger = this.button(t, "h-editor", this.openingEditor ? "Opening…" : "Editor  e", (cx) => this.toggleEditorMenu(cx), false, !this.openingEditor);
-    return Popup.new("h-editor-menu", trigger).anchor(anchor)
-      .when(this.editorMenu, (el) => el.content(this.editorList(t)));
+  spinner(t) {
+    return svg(`${ICON}/spinner.svg`).size(13).flex_none().text_color(t.dim).spin(900);
+  }
+
+  iconButton(t, id, label, action) {
+    return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
+  }
+
+  miniButton(t, id, label, action) {
+    return h_flex().id(id).h(22).px(7).items_center().rounded(6).text_size(11.5).flex_none().text_color(t.dim)
+      .cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", stop).on_click((_e, cx) => action(cx)).child(label);
+  }
+
+  // The search, always there on the list, like Linear's.
+  findBox(t, hint) {
+    const q = this.search.value();
+    return h_flex().id("glr-search").h(28).w(320).flex_shrink_1().min_w(140).px(10).gap(8).items_center().rounded(8).border_1()
+      .border_color(this.searchFocused ? t.accent : t.input).bg(t.background).on_mouse_down("left", stop)
+      .child(svg(`${ICON}/search.svg`).size(13).flex_none().text_color(t.dim))
+      .child(Input.new(this.search).flex_1().h_full().text_size(12.5).text_color(t.foreground))
+      .when(!q, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(hint)))
+      .when(Boolean(q), (el) => el.child(this.miniButton(t, "s-clear", "×", (cx) => this.clearSearch(cx))));
+  }
+
+  clearSearch(cx) {
+    this.search.set_value("");
+    this.query = "";
+    this.refsOpen = false;
+    this.sel = 0;
+    cx.notify();
+  }
+
+  // The merge request's actions, in one dropdown in the sidebar; the editor list opens in its place.
+  actionsButton(t, d) {
+    const trigger = this.button(t, "h-actions", this.openingEditor ? "Opening…" : "Actions  ▾", (cx) => this.toggleActionsMenu(cx), this.actionsMenu || this.editorMenu);
+    return Popup.new("h-actions-menu", trigger).anchor("top_left")
+      .when(this.editorMenu, (el) => el.content(this.editorList(t)))
+      .when(this.actionsMenu && !this.editorMenu, (el) => el.content(this.actionsList(t, d)));
+  }
+
+  actionsList(t, d) {
+    const mr = d.mr;
+    const draft = this.draftable();
+    const items = [
+      draft && [this.drafting ? "Saving…" : this.isDraft(draft) ? "Mark as ready" : "Mark as draft", (cx) => this.toggleDraft(cx), !this.drafting],
+      mr.web_url && ["Open in the browser", (cx) => cx.open_url(mr.web_url)],
+      [this.openingEditor ? "Opening the editor…" : "Open in an editor…", null, !this.openingEditor],
+      !this.local && [this.ignored[this.iid] ? "Restore" : "Ignore", (cx) => this.toggleIgnore(this.iid, cx)],
+      ["Search", (cx) => this.openSearch(cx)],
+      ["Reload", (cx) => this.reload(cx)],
+    ].filter(Boolean);
+    return this.menuList(t, "h-actions-list", items, (cx) => { this.actionsMenu = false; this.editorMenu = true; cx.notify(); }).mt(4);
+  }
+
+  // A dropdown's entries: [label, action, enabled]; an entry without an action runs `other`, which keeps the menu to itself.
+  menuList(t, id, items, other = null) {
+    return v_flex().id(id).min_w(220).p(4).rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down("left", stop)
+      .children(items.map(([label, action, enabled = true], n) => h_flex().id(`${id}-${n}`).h(28).px(10).gap(8).items_center().rounded(6).text_size(12.5)
+        .when(!enabled, (el) => el.opacity(0.5))
+        .when(enabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+          .on_click((_e, cx) => action ? this.runAction(action, cx) : other?.(cx)))
+        .child(div().flex_1().min_w(0).truncate().child(label))));
   }
 
   editorList(t) {
@@ -2567,10 +2689,7 @@ export default class GitlabReview extends View {
     const d = this.iid ? this.details[this.iid] : null;
     const refs = d && this.q() ? this.refs(d).length : 0;
     return h_flex().h(40).flex_none().px(12).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(h_flex().id("glr-search").h(28).flex_1().px(10).gap(8).items_center().rounded(7).border_1()
-        .border_color(this.searchFocused ? t.accent : t.input).bg(t.background).on_mouse_down("left", stop)
-        .child(div().text_size(12).text_color(t.dim).child("/"))
-        .child(Input.new(this.search).flex_1().h_full().text_size(12.5)))
+      .child(this.findBox(t, "Search  ⌘F").w_auto().flex_1())
       .when(Boolean(this.q()) && !this.refsOpen, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`${shown} / ${total}`)))
       .when(Boolean(d) && Boolean(this.q()), (el) => el.child(this.button(t, "s-refs",
         this.refsOpen ? "Hide the list" : `${refs >= MAX_REFS ? `${MAX_REFS}+` : refs} in the code ↵`,
@@ -2596,7 +2715,7 @@ export default class GitlabReview extends View {
         ["g", `Ask ${agent}`], ["i", "Ignore"], ["o", "Open in the browser"], ["e", "Editor"], ["⇧E", "Pick the editor"], ["⌘R", "Refresh"], ["Esc", "Back"]];
     }
     if (this.picked().length > 1) return [["i", `Ignore or restore the ${this.picked().length} selected`], ["Esc", "Unselect"]];
-    return [["1–5 Tab ⇧Tab", "Lists"], ["p", "Pick someone"], ["/", "Search"], ["↑ ↓", "Move"], ["⇧↑↓", "Select several"],
+    return [["1–4 Tab ⇧Tab", "Filters"], ["p", "Whose merge requests"], ["/", "Search"], ["↑ ↓", "Move"], ["← →", "Fold or open a stack"], ["⇧↑↓", "Select several"],
       ["Enter", "Open"], ["i", "Ignore or restore"], ["⌘R", "Refresh"], ["Esc", "Close"]];
   }
 
@@ -2636,6 +2755,18 @@ export default class GitlabReview extends View {
       .child(kbd(label));
   }
 
+  // The pipeline of a row: a click opens it on GitLab, not the merge request.
+  pipelineCell(t, m, health, color, w) {
+    const host = String(m.web_url ?? "").match(/^https?:\/\/[^/]+/)?.[0];
+    const url = host && health.pipelinePath ? `${host}${health.pipelinePath}` : String(m.web_url ?? "").replace(/\/?$/, "/pipelines");
+    return h_flex().id(`mr-pipe-${m.iid}`).w(w).flex_none().h(22).px(6).gap(6).items_center().rounded(5)
+      .text_size(11.5).text_color(color).cursor_pointer().hover((s) => s.bg(t.hover))
+      .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.openLink(url, cx); })
+      .child(div().size(7).flex_none().rounded(4).bg(color))
+      .child(div().flex_1().min_w(0).truncate().child(health.pipeline))
+      .child(div().flex_none().text_color(t.dim).child("↗"));
+  }
+
   linkChip(t, id, text, color, url) {
     return h_flex().id(`lc-${id}`).flex_none().h(20).px(8).items_center().rounded(10).border_1().border_color(color ?? t.border)
       .text_size(11).text_color(color ?? t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
@@ -2647,94 +2778,124 @@ export default class GitlabReview extends View {
     return div().flex_none().h(20).px(8).rounded(10).border_1().border_color(color ?? t.border).text_size(11).text_color(color ?? t.muted).child(text);
   }
 
+  waiting(t) {
+    const error = this.status?.level === "error" && !this.loading.size ? this.status.text : null;
+    return v_flex().flex_1().items_center().justify_center().gap(6).px(24).text_color(t.dim)
+      .when(!error, (el) => el.child("Loading…"))
+      .when(Boolean(error), (el) => el.child(div().text_color(t.blocked).text_center().child(error)).child(div().text_size(11.5).child("⌘R to try again")));
+  }
+
   listView(t) {
     const rows = this.listed();
-    if (!this.user || (!this.mrs.length && this.loading.has("mrs"))) {
-      return v_flex().flex_1().items_center().justify_center().text_color(t.dim).child(this.status?.level === "error" ? "" : "Loading…");
-    }
+    if (!this.user || (!this.mrs.length && this.loading.has("mrs"))) return this.waiting(t);
     const section = (id, text, n) => h_flex().id(id).px(16).pt(10).pb(4).gap(8).items_center().text_size(11).font_semibold().text_color(t.dim)
       .child(text).child(div().font_normal().child(String(n)));
     const q = this.q();
     const items = [];
     const replied = this.listTab === "review" ? rows.filter((x) => x.replied).length : 0;
+    const stacks = rows.some((x) => x.kids || x.depth);
     if (replied) items.push(section("sec-replied", "REPLIED TO YOU", replied));
-    if (this.listTab === "person") items.push(this.personBar(t));
     rows.forEach((x, n) => {
       if (replied && n === replied) items.push(section("sec-others", "THE OTHERS", rows.length - replied));
-      items.push(this.mrRow(t, x, n));
+      items.push(this.mrRow(t, x, n, stacks));
     });
+    if (this.source(this.listTab) === null) return this.waiting(t);
+    const who = this.someone?.name;
     const empty = q ? "No match"
-      : this.listTab === "mine" ? "You have no open merge request here"
+      : this.listTab === "authored" ? (who ? `${who} has no open merge request here` : "You have no open merge request here")
       : this.listTab === "ignored" ? "Nothing ignored: i on a merge request puts it here"
-      : this.listTab === "merged" ? (this.merged === null || this.loading.has("merged") ? "Loading…" : "No merged merge request you reviewed")
-      : this.listTab === "person" ? (!this.someone ? "Pick someone to see their open merge requests" : this.someoneMrs === null ? "Loading…" : `${this.someone.name} has no open merge request here`)
-      : this.mrs.length ? "Nothing left: everything else is ignored" : "No open merge request waits on your review here";
+      : this.listTab === "merged" ? (who ? `No merged merge request ${who} reviewed` : "No merged merge request you reviewed")
+      : this.source("review").length ? "Nothing left: everything else is ignored"
+      : who ? `No open merge request waits on ${who}'s review here` : "No open merge request waits on your review here";
     if (!rows.length) items.push(div().px(16).py(10).text_size(12).text_color(t.dim).child(empty));
-    return v_flex().id("glr-list").flex_1().min_h(0).pt(4).pb(80).overflow_y_scrollbar().children(items);
+    return v_flex().flex_1().min_h(0)
+      .when(rows.length > 0, (el) => el.child(this.listHeader(t, stacks)))
+      .child(v_flex().id("glr-list").flex_1().min_h(0).pt(4).pb(80).overflow_y_scrollbar().children(items));
   }
 
-  personBar(t) {
-    const picking = this.peoplePick?.kind === "author";
-    return v_flex().id("person-bar").px(12).pt(6).pb(4).gap(6)
-      .child(h_flex().gap(8).items_center()
-        .when(Boolean(this.someone), (el) => el.child(this.avatar(t, this.someone.name, 20))
-          .child(div().text_size(12.5).text_color(t.foreground).child(this.someone.name))
-          .child(div().text_size(11).text_color(t.dim).child(`@${this.someone.username}`)))
-        .child(this.button(t, "person-pick", picking ? "Close  Esc" : this.someone ? "Someone else  P" : "Pick someone  P", (cx) => this.openPeople("author", cx))))
-      .when(picking, (el) => el.child(this.peoplePicker(t)));
+  // The list is a table: one column per kind of tag, named in the header.
+  cols() {
+    return { iid: 60, activity: 170, review: 116, pipeline: 96, approvals: 84, author: 120, when: 52, action: 64 };
   }
 
-  mrRow(t, { m, ignored, merged, replied, own }, n) {
+  listHeader(t, stacks) {
+    const c = this.cols();
+    const head = (w, text) => div().w(w).flex_none().truncate().child(text);
+    return h_flex().flex_none().mx(6).px(10).h(28).gap(10).items_center().border_b(1).border_color(t.border)
+      .text_size(10.5).font_semibold().text_color(t.dim)
+      .child(head(c.iid, "MR"))
+      .child(div().flex_1().min_w(0).when(stacks, (el) => el.pl(64)).child("TITLE"))
+      .child(head(c.activity, "ACTIVITY"))
+      .child(head(c.review, this.someone ? "MY REVIEW" : "YOUR REVIEW"))
+      .child(head(c.pipeline, "PIPELINE"))
+      .child(head(c.approvals, "APPROVALS"))
+      .child(head(c.author, "AUTHOR"))
+      .child(head(c.when, this.listTab === "merged" ? "MERGED" : "UPDATED"))
+      .child(div().w(c.action).flex_none());
+  }
+
+  mrRow(t, { m, ignored, merged, own, depth = 0, kids = 0, folded = false, stackedOn = null }, n, stacks = false) {
+    const c = this.cols();
     const on = this.inPick(n);
     const raw = merged ? { kind: "seen", at: null } : this.news(m);
     const nw = own && raw.kind === "new" ? { kind: "seen", at: null } : own && raw.kind === "updated" ? { ...raw, commits: false } : raw;
-    const health = own ? this.health[m.iid] : null;
+    const health = this.health[m.iid] ?? null;
     const pipeColor = { success: t.done, failed: t.blocked, canceled: t.dim, running: t.accent, pending: t.accent };
     const unread = nw.kind !== "seen";
     const me = this.mine[m.iid];
-    const mineTag = me?.approved || (!me && this.seen[m.iid]?.approved) ? ["approved", t.done]
+    const review = own ? null : me?.approved || (!me && this.seen[m.iid]?.approved) ? ["approved", t.done]
       : me?.state === "REQUESTED_CHANGES" ? ["changes requested", t.blocked]
       : me?.commented ? ["commented", t.muted] : null;
     const answers = this.replied[m.iid] ?? [];
-    const tags = nw.kind === "new" ? ["new"]
+    const activity = nw.kind === "new" ? ["new"]
       : nw.kind === "updated" ? [
-        answers.length && `↩ ${[...new Set(answers)].join(", ")} replied to you`,
+        answers.length && `↩ ${[...new Set(answers)].join(", ")}`,
         nw.commits && "new commits",
         nw.notes > answers.length && `+${nw.notes - answers.length} comment${nw.notes - answers.length > 1 ? "s" : ""}`,
         nw.other && "updated",
       ].filter(Boolean) : [];
-    return h_flex().id(`mr-${m.iid}`).mx(6).px(10).h(34).gap(10).items_center().rounded(6).cursor_pointer()
+    const none = (w) => div().w(w).flex_none().text_size(11.5).text_color(t.dim).child("—");
+    const text = (w, value, color) => div().w(w).flex_none().truncate().text_size(11.5).text_color(color).child(value);
+    const approvals = !health ? null : health.approved ? ["approved", t.done] : [`${health.left} left`, t.muted];
+    return h_flex().id(`mr-${m.iid}`).mx(6).px(10).h(38).gap(10).items_center().rounded(6).cursor_pointer()
       .when(on, (el) => el.bg(t.selected)).hover((s) => s.bg(on ? t.selected : t.hover))
       .on_mouse_down("left", stop)
       .on_click((e, cx) => { if (n === this.sel || e.click_count === 2) this.open(m.iid, cx); else { this.anchor = null; this.sel = n; cx.notify(); } })
-      .child(h_flex().flex_1().min_w(0).h_full().gap(10).items_center().when(ignored, (el) => el.opacity(0.55))
-        .child(div().size(8).flex_none().rounded(4).when(unread, (el) => el.bg(t.accent)))
-        .child(h_flex().w(64).flex_none().child(div().id(`mr-iid-${m.iid}`).text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.accent))
-          .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.copy(`!${m.iid}`, cx); }).child(`!${m.iid}`)))
+      .when(ignored, (el) => el.opacity(0.55))
+      .child(h_flex().w(c.iid).flex_none().child(div().id(`mr-iid-${m.iid}`).text_size(11.5).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.accent))
+        .on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); this.copy(`!${m.iid}`, cx); }).child(`!${m.iid}`)))
+      .child(h_flex().flex_1().min_w(0).h_full().gap(8).items_center()
+        .when(depth > 0, (el) => el.child(h_flex().w(depth * 26).flex_none().justify_end()
+          .child(svg(`${ICON}/stacked.svg`).size(20).flex_none().text_color(t.accent))))
+        .when(stacks, (el) => el.child(kids ? h_flex().id(`mr-fold-${m.iid}`).w(54).h(28).flex_none().px(7).gap(4).items_center().justify_center().rounded(5)
+            .border_1().border_color(folded ? t.border : t.accent).bg(folded ? t.popover : t.selected)
+            .text_size(12.5).font_semibold().text_color(t.accent)
+            .cursor_pointer().hover((s) => s.bg(t.hover)).on_mouse_down("left", stop)
+            .on_click((_e, cx) => { cx.stop_propagation(); this.toggleFold(m.iid, cx); })
+            .child(svg(`${ICON}/${folded ? "chevron-right" : "chevron-down"}.svg`).size(18).flex_none().text_color(t.accent))
+            .child(String(kids))
+          : div().w(54).flex_none()))
         .when(m.draft, (el) => el.child(this.chip(t, "draft")))
-        .when(!(m.target_branch && m.target_branch !== this.baseBranch()) && this.stackedOn(m) > 0, (el) => el.child(this.chip(t, `stack base · ${this.stackedOn(m)} on it`, t.accent)))
-        .when(Boolean(m.target_branch) && m.target_branch !== this.baseBranch(), (el) => el.child(this.chip(t, this.stackParents[m.target_branch] ? `stacked on !${this.stackParents[m.target_branch].iid}` : `stacked on ${m.target_branch}`, t.accent)))
-        .when(ignored, (el) => el.child(this.chip(t, "ignored")))
-        .when(Boolean(mineTag), (el) => el.child(this.chip(t, mineTag?.[0], mineTag?.[1])))
         .child(div().flex_1().min_w(0).truncate().when(unread, (el) => el.font_semibold())
           .text_color(ignored || !unread ? t.muted : t.foreground).child(m.title))
-        .children(tags.map((x) => this.chip(t, x, t.accent)))
-        .when(Boolean(health?.pipeline), (el) => el.child(this.chip(t, `pipeline ${health.pipeline}`, pipeColor[health.pipeline] ?? t.muted)))
-        .when(Boolean(health), (el) => el.child(this.chip(t, health.approved ? `approved${health.by.length ? ` by ${health.by.map((u) => `@${u}`).join(", ")}` : ""}` : `${health.left} approval${health.left === 1 ? "" : "s"} left`, health.approved ? t.done : t.muted)))
-        .when(Boolean(health?.conflicts || m.has_conflicts), (el) => el.child(this.chip(t, "conflicts", t.blocked)))
-        .when(nw.kind === "seen" && !merged && Boolean(nw.at), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(`seen ${agoText(nw.at)}`)))
-        .when(Boolean(merged), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(`merged ${agoText(m.merged_at)}`)))
-        .child(div().w(150).flex_none().truncate().text_size(11.5).text_color(t.muted).child(own ? "you" : who(m.author)))
-        .child(div().w(40).flex_none().text_size(11).text_color(t.dim).child(ago(m.updated_at))))
-      .when(!merged && !own, (el) => el.child(h_flex().id(`mr-ig-${m.iid}`).h(22).px(8).flex_none().items_center().rounded(5).border_1().border_color(t.border)
+        .when(Boolean(stackedOn), (el) => el.child(this.chip(t, this.stackParents[stackedOn] ? `on !${this.stackParents[stackedOn].iid}` : `on ${stackedOn}`, t.accent)))
+        .when(Boolean(health?.conflicts || m.has_conflicts), (el) => el.child(this.chip(t, "conflicts", t.blocked))))
+      .child(activity.length ? text(c.activity, activity.join(" · "), t.accent).font_semibold()
+        : nw.at && !merged ? text(c.activity, `seen ${agoText(nw.at)}`, t.dim) : none(c.activity))
+      .child(review ? text(c.review, review[0], review[1]) : none(c.review))
+      .child(health?.pipeline ? this.pipelineCell(t, m, health, pipeColor[health.pipeline] ?? t.muted, c.pipeline) : none(c.pipeline))
+      .child(approvals ? text(c.approvals, approvals[0], approvals[1]) : none(c.approvals))
+      .child(text(c.author, own ? "you" : who(m.author), t.muted))
+      .child(text(c.when, ago(merged ? m.merged_at : m.updated_at), t.dim))
+      .child(!merged && !own ? h_flex().id(`mr-ig-${m.iid}`).w(c.action).h(22).flex_none().justify_center().items_center().rounded(5).border_1().border_color(t.border)
         .text_size(11).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground))
         .on_mouse_down("left", stop)
         .on_click((_e, cx) => { cx.stop_propagation(); if (on && this.picked().length > 1) this.ignorePicked(cx); else { this.anchor = null; this.toggleIgnore(m.iid, cx); } })
-        .child(ignored ? "Restore" : "Ignore")));
+        .child(ignored ? "Restore" : "Ignore") : div().w(c.action).flex_none());
   }
 
   mrView(t, d) {
-    if (!d) return v_flex().flex_1().items_center().justify_center().text_color(t.dim).child("Loading…");
+    if (!d) return this.waiting(t);
     const q = this.q();
     const files = this.shownFiles(d), threads = this.shownThreads(d);
     const counts = {
@@ -2762,9 +2923,7 @@ export default class GitlabReview extends View {
       .when(this.local, (el) => el.child(this.branchBanner(t, d)))
       .when(this.searchOpen || Boolean(this.query), (el) => el.child(this.searchBar(t, shown, total)))
       .child(body)
-      .when(this.local, (el) => el.child(this.localBar(t)))
-      .when(!this.local && d.mr.state === "opened", (el) => el.child(this.reviewBar(t, d)))
-      .child(this.composer(t, this.local || d.mr.state === "opened"));
+      .child(this.composer(t, d, this.local || d.mr.state === "opened"));
     return v_flex().flex_1().min_h(0).child(tabs)
       .child(h_flex().flex_1().min_h(0).items_stretch().child(main).child(this.sidebarView(t, d)));
   }
@@ -2826,66 +2985,31 @@ export default class GitlabReview extends View {
       .children(chain));
   }
 
-  sideRules(t, d) {
-    const matches = this.rulesFor(d);
-    const note = !this.rules ? (this.rulesError ? `Unavailable: ${this.rulesError}` : "Loading…") : matches.length ? null : "None applies to these files";
-    return this.sideSection(t, "Review rules", matches.length || null, v_flex().w_full().gap(4)
-      .when(Boolean(note), (el) => el.child(div().text_size(12).text_color(t.dim).child(note)))
-      .children(matches.map(({ rule, files }) => h_flex().id(`sr-${rule.page_id}`).w_full().gap(6).items_center().text_size(12)
-        .child(div().flex_1().min_w(0).truncate().text_color(rule.page_url ? t.accent : t.foreground)
-          .when(Boolean(rule.page_url), (el) => el.cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => this.openLink(rule.page_url, cx)))
-          .child(rule.page_title))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(`${files.length} file${files.length > 1 ? "s" : ""}`))))
-      .when(matches.length > 0, (el) => el.child(h_flex().pt(4).child(this.button(t, "sr-run", `Review against ${matches.length} rule${matches.length > 1 ? "s" : ""}`, (cx) => this.reviewRules(cx), true)))));
-  }
-
   sidebarView(t, d) {
     const s = d.side, mr = d.mr, real = mr.state !== "local";
     const none = (text) => div().text_size(12).text_color(t.dim).child(text);
-    const detail = (k, v) => h_flex().w_full().gap(8).text_size(12).child(div().w(64).flex_none().text_color(t.dim).child(k)).child(div().flex_1().min_w(0).truncate().child(v));
-    const copyDetail = (k, v) => h_flex().id(`sd-${k}`).w_full().gap(8).text_size(12).cursor_pointer().hover((s) => s.text_color(t.accent))
-      .on_mouse_down("left", stop).on_click((_e, cx) => this.copy(v, cx))
-      .child(div().w(64).flex_none().text_color(t.dim).child(k)).child(div().flex_1().min_w(0).truncate().child(v)).child(div().flex_none().text_size(11).text_color(t.dim).child("⧉"));
     const status = real
       ? v_flex().w_full().gap(8)
         .child(h_flex().gap(6).items_center().flex_wrap().child(this.statePill(t, mr))
           .when(mr.state === "opened" && (mr.has_conflicts || mr.detailed_merge_status === "conflict"), (el) => el.child(this.chip(t, "merge conflict", t.blocked)))
-          .when(Boolean(mr.detailed_merge_status) && mr.state === "opened" && mr.detailed_merge_status !== "conflict", (el) => el.child(this.chip(t, mr.detailed_merge_status.replace(/_/g, " "))))
+          .when(Boolean(mr.detailed_merge_status) && mr.state === "opened" && !["conflict", "draft_status"].includes(mr.detailed_merge_status), (el) => el.child(this.chip(t, mr.detailed_merge_status.replace(/_/g, " "))))
           .when(Boolean(mr.head_pipeline?.status), (el) => el.child(this.pipelineChip(t, mr))))
         .when(mr.state === "opened" && mr.diverged_commits_count > 0, (el) => el.child(h_flex().gap(6).items_center().flex_wrap()
           .child(this.chip(t, `${mr.diverged_commits_count} commit${mr.diverged_commits_count > 1 ? "s" : ""} behind ${mr.target_branch}`, t.blocked))
-          .child(this.sideLink(t, "sa-rebase", this.rebasing ? "Asking…" : `Ask ${this.agentName()} to rebase`, (cx) => this.askRebase(cx)))))
+          .child(this.agentButton(t, "sa-rebase", this.rebasing ? "Asking…" : `Ask ${this.agentName()} to rebase`, (cx) => this.askRebase(cx), !this.rebasing))))
         .when(!this.local && !this.lastVisit[mr.iid] && mr.state === "opened", (el) => el.child(h_flex().child(this.chip(t, "first visit", t.accent))))
         .when(!this.local && Boolean(this.lastVisit[mr.iid]), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(`You last looked ${agoText(this.lastVisit[mr.iid].at)}`)))
-        .when(Boolean(this.draftable()), (el) => el.child(h_flex().child(this.draftButton(t))))
       : v_flex().w_full().gap(8).child(none(d.status?.pushed ? "No merge request for this branch yet" : "Not pushed yet, no merge request"))
         .when(this.local && !this.remote && Boolean(mr.source_branch) && mr.source_branch !== String(d.base ?? "").replace(/^origin\//, ""), (el) =>
           el.child(h_flex().child(this.button(t, "sa-create-mr", this.creatingMr ? "Opening…" : d.status?.pushed ? "Open a draft MR" : "Push and open a draft MR", (cx) => this.createMr(cx), true, !this.creatingMr))));
-    const actions = h_flex().w_full().gap(6).flex_wrap()
-      .child(this.button(t, "sa-claude", `Ask ${this.agentName()}  g`, (cx) => this.openClaude(cx), true))
-      .when(Boolean(mr.web_url), (el) => el.child(this.button(t, "sa-web", "Browser  o", (cx) => cx.open_url(mr.web_url))))
-      .child(this.editorButton(t, "top_left"))
-      .when(!this.local, (el) => el.child(this.button(t, "sa-ignore", this.ignored[this.iid] ? "Restore  i" : "Ignore  i", (cx) => this.toggleIgnore(this.iid, cx))))
-      .child(this.button(t, "sa-search", "Search  ⌘F", (cx) => this.openSearch(cx)))
-      .child(this.button(t, "sa-refresh", "↻ Reload  ⌘R", (cx) => this.reload(cx)));
     const side = v_flex().id("mr-side").w(SIDEBAR_W).flex_none().min_h(0).border_l(1).border_color(t.border).bg(t.surface).overflow_y_scrollbar()
       .px(12).py(12).gap(16)
       .child(this.sideSection(t, "Status", null, status))
-      .child(this.sideSection(t, "Actions", null, actions))
-      .when(real, (el) => el.child(this.sideRules(t, d)));
+      .child(h_flex().w_full().child(this.actionsButton(t, d)));
     if (!real) {
-      return side.when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)))
-        .child(this.sideSection(t, "Details", null, v_flex().w_full().gap(4)
-          .child(copyDetail("Branch", mr.source_branch ?? ""))
-          .child(copyDetail("Into", d.base ?? mr.target_branch ?? ""))));
+      return side.when(Boolean(d.stack), (el) => el.child(this.stackSection(t, d)));
     }
-    const details = this.sideSection(t, "Details", null, v_flex().w_full().gap(4)
-      .child(detail("Author", mr.author?.name ?? who(mr.author)))
-      .child(copyDetail("Branch", mr.source_branch))
-      .child(copyDetail("Into", mr.target_branch))
-      .child(detail("Opened", agoText(mr.created_at)))
-      .child(detail("Updated", agoText(mr.updated_at))));
-    if (!s) return side.child(none("Loading reviewers…")).child(details);
+    if (!s) return side.child(none("Loading reviewers…"));
     const people = (list, right) => list.length ? v_flex().w_full().gap(1).children(list.map((u) => this.person(t, u, right?.(u)))) : none("None");
     const reviewState = (r) => {
       const [text, color] = REVIEW_STATE[r.state] ?? REVIEW_STATE.UNREVIEWED;
@@ -2919,16 +3043,10 @@ export default class GitlabReview extends View {
         v_flex().w_full().gap(6).when(this.peoplePick?.kind === "labels", (el) => el.child(this.peoplePicker(t)))
           .child(s.labels.length ? h_flex().w_full().gap(5).flex_wrap().children(s.labels.map((l) => this.labelPill(t, l))) : none("None")),
         editable ? this.sideLink(t, "sp-edit-labels", this.peoplePick?.kind === "labels" ? "Done" : "Edit", (cx) => this.openPeople("labels", cx), this.peoplePick?.kind === "labels") : null))
-      .when(Boolean(s.milestone) || editable, (el) => el.child(this.sideSection(t, "Milestone", null,
-        v_flex().w_full().gap(6).when(this.peoplePick?.kind === "milestone", (el) => el.child(this.peoplePicker(t)))
-          .child(s.milestone ? div().text_size(12).child(s.milestone.title) : none("None")),
-        editable ? this.sideLink(t, "sp-edit-milestone", this.peoplePick?.kind === "milestone" ? "Done" : "Edit", (cx) => this.openPeople("milestone", cx), this.peoplePick?.kind === "milestone") : null)))
       .child(this.sideSection(t, "Participants", s.participants.length || null,
         s.participants.length ? h_flex().w_full().gap(4).flex_wrap().children(s.participants.map((u) =>
-          div().id(`spa-${u.username}`).cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(`https://gitlab.com/${u.username}`))
-            .child(this.avatar(t, u.name ?? u.username, 24)))) : none("None")))
-      .when(s.participants.length > 0, (el) => el.child(div().text_size(11).text_color(t.dim).child(s.participants.map((u) => u.name ?? u.username).join(", "))))
-      .child(details);
+          div().id(`spa-${u.username}`).tooltip(u.name ?? u.username).cursor_pointer().on_mouse_down("left", stop).on_click((_e, cx) => cx.open_url(`https://gitlab.com/${u.username}`))
+            .child(this.avatar(t, u.name ?? u.username, 24)))) : none("None")));
   }
 
   freshCount(d) {
@@ -2963,34 +3081,15 @@ export default class GitlabReview extends View {
       .child(TextView.markdown(`dr-body-${x.id}`, x.note ?? "").selectable());
   }
 
-  rulesView(t, d) {
-    const matches = this.rulesFor(d);
-    const head = h_flex().gap(8).items_center()
-      .child(div().text_size(12).font_semibold().child("Team review rules"))
-      .child(div().text_size(11.5).text_color(t.dim).child(!this.rules ? (this.rulesError ? `unavailable: ${this.rulesError}` : "loading…")
-        : matches.length ? `${matches.length} apply to this merge request` : "none applies to these files"))
-      .child(div().flex_1())
-      .when(matches.length > 0, (el) => el.child(this.button(t, "rv-rules", `Ask ${this.agentName()} to review against them`, (cx) => this.reviewRules(cx), true)));
-    return v_flex().gap(8).p(12).rounded(8).border_1().border_color(t.border)
-      .child(head)
-      .children(matches.map(({ rule, globs, files }) => h_flex().id(`rule-${rule.page_id}`).gap(8).items_center().text_size(12)
-        .child(this.chip(t, rule.mode))
-        .child(div().flex_none().text_color(rule.page_url ? t.accent : t.foreground).cursor_pointer()
-          .when(Boolean(rule.page_url), (el) => el.on_mouse_down("left", stop).on_click((_e, cx) => this.openLink(rule.page_url, cx)))
-          .child(rule.page_title))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).font_family(MONO)
-          .child(`${globs.join(", ")} · ${files.length} file${files.length > 1 ? "s" : ""}`))));
-  }
-
   reviewView(t, d) {
     const list = this.shownDrafts(d);
-    const view = v_flex().id("glr-review").flex_1().min_h(0).p(16).pb(120).gap(12).overflow_y_scrollbar().child(this.rulesView(t, d));
+    const view = v_flex().id("glr-review").flex_1().min_h(0).p(16).pb(120).gap(12).overflow_y_scrollbar();
     if (this.local) {
       const q = this.q();
       const notes = q ? this.notes.filter((x) => has(x.note, q) || has(x.position?.new_path, q)) : this.notes;
       return view
         .child(div().text_size(12).font_semibold().child(`Your review · ${notes.length}`))
-        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(kbd(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to ${this.agentName()} (a)${this.remote ? " or Post on GitLab" : ""}`))))
+        .when(!notes.length, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(kbd(`c on a line (or a reply, or text here), then ⌘↵, adds to your review; at the end send it to ${this.agentName()} (a)${this.remote ? " or GitLab (Send to)" : ""}`))))
         .children(notes.map((x) => this.draftView(t, d, x, true)))
         .when(list.length > 0, (el) => el.child(div().pt(8).text_size(12).font_semibold().child(`Pending on GitLab · ${list.length}`)))
         .children(list.map((x) => this.draftView(t, d, x)));
@@ -3001,33 +3100,6 @@ export default class GitlabReview extends View {
         .child(div().text_size(11.5).child(kbd("Write a comment and press ⌘↵: it waits here until you submit your review"))));
     }
     return view.children(list.map((x) => this.draftView(t, d, x)));
-  }
-
-  reviewBar(t, d) {
-    const typed = this.draft.value().trim();
-    const n = d.drafts.length + (typed ? 1 : 0), mine = d.approvals?.user_has_approved;
-    const busy = this.reviewing;
-    const go = (then) => (cx) => {
-      const text = this.draft.value().trim();
-      const pending = text ? this.draftPayload(text) : null;
-      cx.spawn(async (cx) => this.submit(then, cx, pending));
-    };
-    return h_flex().h(40).flex_none().px(16).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(div().text_size(12).font_semibold().child("Your review"))
-      .when(d.drafts.length > 0, (el) => el.child(this.chip(t, `${d.drafts.length} pending`, t.accent)))
-      .when(Boolean(typed), (el) => el.child(this.chip(t, "+ the text below", t.accent)))
-      .when(Boolean(mine), (el) => el.child(this.chip(t, "approved by you", t.done)))
-      .when(d.state === "REQUESTED_CHANGES", (el) => el.child(this.chip(t, "you requested changes", t.blocked)))
-      .when(!mine && Boolean(d.approvals?.approvals_left), (el) => el.child(this.chip(t, `${d.approvals.approvals_left} approval${d.approvals.approvals_left > 1 ? "s" : ""} left`)))
-      .child(div().flex_1())
-      .when(d.drafts.length > 0, (el) => el.child(this.button(t, "rv-discard", "Discard all", (cx) => this.discard(cx), false, !busy)))
-      .when(d.drafts.length > 0, (el) => el.child(this.button(t, "rv-claude", `Ask ${this.agentName()} about these ${d.drafts.length}`, (cx) => this.askAboutReview(cx), false, !busy)))
-      .when(busy, (el) => el.child(div().text_size(11.5).text_color(t.dim).child("Submitting…")))
-      .child(this.button(t, "rv-changes", n ? `Submit ${n} + request changes` : "Request changes", go("changes"), false, !busy))
-      .child(mine
-        ? this.button(t, "rv-unapprove", n ? `Submit ${n} + revoke approval` : "Revoke approval", go("unapprove"), false, !busy)
-        : this.button(t, "rv-approve", n ? `Submit ${n} + approve` : "Approve", go("approve"), false, !busy && d.approvals?.user_can_approve !== false))
-      .when(n > 0, (el) => el.child(this.button(t, "rv-submit", `Submit ${n} comment${n > 1 ? "s" : ""}`, go(null), true, !busy)));
   }
 
   descBlocks(d) {
@@ -3553,25 +3625,44 @@ export default class GitlabReview extends View {
       .child(div().flex_1().min_w(0).child(row.text || " "));
   }
 
-  composer(t, open = true) {
-    const empty = !this.draft.value().trim();
+  // The comment box: add the text to your review, send the review to the agent or GitLab, or finish it.
+  composer(t, d, open = true) {
+    const typed = this.draft.value().trim(), empty = !typed;
+    const pending = this.local ? this.notes.length : d.drafts.length;
+    const n = pending + (typed ? 1 : 0), busy = this.sending || this.reviewing;
+    const plus = n ? ` (+ ${n} comment${n > 1 ? "s" : ""})` : "";
+    const agent = this.agentName();
+    const send = this.local
+      ? [[`${agent}  a`, (cx) => this.sendLocal(cx), n > 0 && !busy],
+        this.remote && ["GitLab", (cx) => this.postNotes(cx), n > 0 && !busy]]
+      : [[`${agent}  ⌥↵`, (cx) => (typed ? this.ask(cx) : this.askAboutReview(cx)), n > 0],
+        ["GitLab", (cx) => (pending ? this.submit(null, cx, typed ? this.draftPayload(typed) : null) : this.post(cx)), n > 0 && !busy]];
+    const mr = this.closable(), mine = d.approvals?.user_has_approved;
+    const finish = (then) => (cx) => this.submit(then, cx, typed ? this.draftPayload(typed) : null);
+    const others = [
+      !this.local && open && (mine
+        ? [`Revoke approval${plus}`, finish("unapprove"), !busy]
+        : [`Approve${plus}`, finish("approve"), !busy && d.approvals?.user_can_approve !== false]),
+      !this.local && open && [`Request changes${plus}`, finish("changes"), !busy],
+      mr?.state === "opened" && [this.closing ? "Closing…" : this.local ? `Close !${mr.iid}` : "Close", (cx) => this.setMrState("close", cx), !this.closing && !this.sending],
+      mr?.state === "opened" && !this.local && this.target === GENERAL && [this.closing ? "Closing…" : "Close with the comment", (cx) => this.setMrState("close", cx, typed), !empty && !this.closing && !this.sending],
+      mr?.state === "closed" && [this.local ? `Reopen !${mr.iid}` : "Reopen", (cx) => this.setMrState("reopen", cx), !this.closing],
+      pending > 0 && [`Discard the ${pending} pending`, (cx) => this.discard(cx), !busy],
+    ].filter(Boolean);
+    const dropdown = (name, label, items) => Popup.new(`c-${name}-menu`, this.button(t, `c-${name}`, `${label}  ▾`, (cx) => this.toggleComposerMenu(name, cx), this.composerMenu === name))
+      .anchor("bottom_right").when(this.composerMenu === name, (el) => el.content(this.menuList(t, `c-${name}-list`, items.filter(Boolean)).mb(4)));
     return v_flex().flex_none().gap(8).px(16).py(10).border_t(1).border_color(t.border).bg(t.popover)
       .child(h_flex().gap(8).items_center().text_size(11.5)
         .child(div().flex_1().min_w(0).truncate().font_semibold().text_color(this.target === GENERAL ? t.muted : t.accent).child(this.targetLabel()))
+        .when(pending > 0, (el) => el.child(this.chip(t, `${pending} pending`, t.accent)))
+        .when(busy, (el) => el.child(div().text_size(11.5).text_color(t.dim).child(this.reviewing ? "Submitting…" : "Sending…")))
         .when(this.target !== GENERAL, (el) => el.child(this.button(t, "c-untarget", "×", (cx) => this.aim(GENERAL, cx)))))
       .child(div().id("c-draft").w_full().min_w(0).rounded(8).border_1().border_color(this.composing ? t.accent : t.border).bg(t.background)
         .on_mouse_down("left", stop).child(Textarea.new(this.draft).w_full()))
       .child(h_flex().gap(8).items_center().justify_end()
         .when(this.target.kind === "line" && Boolean(this.target.row?.new) && Boolean(this.draftable()), (el) => el.child(this.button(t, "c-suggest", "Suggest a change", (cx) => this.suggestLines(cx))))
-        .when(!this.local, (el) => el.child(this.button(t, "c-ask", `Ask ${this.agentName()}  ⌥↵`, (cx) => this.ask(cx), false, !empty)))
-        .when(!this.local, (el) => el.child(this.button(t, "c-post", "Post now", (cx) => this.post(cx), false, !empty && !this.sending)))
-        .when(this.closable()?.state === "opened", (el) => {
-          const withText = !this.local && this.target === GENERAL && !empty;
-          return el.child(this.button(t, "c-closemr",
-            this.closing ? "Closing…" : withText ? "Comment & close" : this.local ? `Close !${this.closable().iid}` : "Close MR",
-            (cx) => this.setMrState("close", cx, withText ? this.draft.value().trim() : null), false, !this.closing && !this.sending));
-        })
-        .when(this.closable()?.state === "closed", (el) => el.child(this.button(t, "c-reopen", this.local ? `Reopen !${this.closable().iid}` : "Reopen", (cx) => this.setMrState("reopen", cx), false, !this.closing)))
+        .when(others.length > 0, (el) => el.child(dropdown("finish", "Review", others)))
+        .child(dropdown("send", n ? `Send ${n} to` : "Send to", send))
         .when(open, (el) => el.child(this.button(t, "c-add", this.sending ? "Saving…" : "Add to review  ⌘↵", (cx) => this.addToReview(cx), true, !empty && !this.sending))));
   }
 }
