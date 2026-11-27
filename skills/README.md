@@ -36,6 +36,23 @@ idea → capture → grill ✋ → explore → options ✋ → technical doubt? 
 
 Its memory file is `~/.herdr/ideas/<repo>/worktrees/<slug>.md`. It writes no spec: that stays in `workflow-linear-build`.
 
+## workflow-oncall and workflow-oncall-incident
+
+On-call runs in `~/dev/pyro`, whose `.mcp.json` has Grafana, Sentry, pganalyze, Confluence and Kubernetes. Its memory is Linear: no file.
+
+```
+Monday: workflow-oncall → ✋ who → parent « On-call <Mon> → <Mon> » → CronCreate (durable) every day ~9h
+  each day:    sdlc-oncall-daily-sync → [daily <yesterday>] on the parent → ✋ an agent for each one not Released
+  next Monday: [handover] → cron deleted → parent Done → cost
+
+A problem: workflow-oncall-incident « short explanation »
+  → sub-issue of the week's parent → identify (one round) → sdlc-oncall-investigate (debug-* in parallel) → [timeline]
+  → sdlc-oncall-finding: cause, fix, call a team? → [finding] → sdlc-complexity ✋ → [risk]
+  → ✋ build (workflow-linear-build) / observe ([observe] for tomorrow's agent) / close → cost
+```
+
+The `debug-*` skills only read: `debug-grafana` (`gcx`), `debug-sentry`, `debug-pganalyze` and `debug-confluence` (MCP), `debug-k8s` (`carbon/bin/kubectl-<env>-developer`), `debug-psql` (`carbon/bin/psql-<env>`, read-only user and `default_transaction_read_only`).
+
 ## Steps
 
 A `sdlc-*` step does not know which workflow runs it: it reads the memory file the workflow names, does its part and writes its result (`sdlc-conventions`). Two workflows share a step as it is, or each has its own.
