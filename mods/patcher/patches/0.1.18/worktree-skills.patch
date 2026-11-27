@@ -1,0 +1,284 @@
+diff -ruN a/mods/menu/main.js b/mods/menu/main.js
+--- a/mods/menu/main.js	2026-11-26 23:48:14
++++ b/mods/menu/main.js	2026-11-26 23:48:14
+@@ -120,7 +120,7 @@
+     const it = items(props(), this.git)[i];
+     if (!it) return;
+     closeOverlay(props()?.overlay);
+-    if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : it[2].action === "new" ? { width: 440, height: 400 } : { width: 440, height: 260 }), props: it[2] });
++    if (it[1] === "worktree") openOverlay({ mod: "my-worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : it[2].action === "new" ? { width: 800, height: 560 } : { width: 440, height: 260 }), props: it[2] });
+     else if (it[1] === "worktree-sync") setShared("worktree-sync.request", { space: it[2].space, at: Date.now() });
+     else run(it[1], it[2]);
+   }
+diff -ruN a/mods/new-menu/main.js b/mods/new-menu/main.js
+--- a/mods/new-menu/main.js	2026-11-26 23:48:14
++++ b/mods/new-menu/main.js	2026-11-26 23:48:14
+@@ -76,7 +76,7 @@
+         .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
+       .child(div().h(1).mx(4).my(5).bg(t.border))
+       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new", here()), shortcut("space.new")))
+-      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 460, height: 400, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
++      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 800, height: 560, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
+       .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "my-worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)))
+       .child(this.row("worktree-sync", svg("mods/workspace-chrome/branch.svg").size(14), "Sync worktrees", () => setShared("worktree-sync.request", { space: space?.id, at: Date.now() }), "", Boolean(space)));
+   }
+diff -ruN a/mods/worktree/main.js b/mods/worktree/main.js
+--- a/mods/worktree/main.js	2026-11-26 23:48:14
++++ b/mods/worktree/main.js	2026-11-26 23:48:14
+@@ -2,7 +2,7 @@
+ // { folder, machine } for a repo without a space; optional { branch, tab, argv }.
+ 
+ import { View, div } from "gpui-kit";
+-import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
++import { v_flex, h_flex, InputState, Input, TextareaState, Textarea, Scrollbar } from "gpui-base";
+ import { run, props, closeOverlay, theme, spaces, panes, terminals, exec, home, appHome, readTextFile } from "herdr";
+ 
+ // Where a space is now: its first terminal's live folder, else where it was made.
+@@ -240,6 +240,51 @@
+ const toSlug = (text) => (text.trim().split("\n").pop() ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "");
+ import { checking } from "herdr";
+ 
++// Skills to start the agent with: the SKILL.md files in ~/.claude/skills and the repo's
++// .claude/skills whose name starts with the prefix typed in the dialog (kept for next time).
++// SKILL_SCAN prints "@@ <path>" then each file's front matter.
++const SKILL_SCAN = `set -- "$HOME/.claude/skills" "$@"
++for d in "$@"; do
++  for f in "$d"/*/SKILL.md; do
++    [ -f "$f" ] || continue
++    echo "@@ $f"
++    awk 'NR == 1 && /^---/ { on = 1; next } on && /^---/ { exit } on' "$f"
++  done
++done`;
++const SKILL_PREFIX = `${appHome()}/.cache/worktree-skills.json`;
++const unquote = (v) => v.trim().replace(/^(["'])(.*)\1$/, "$2");
++function parseSkills(out) {
++  const list = [], seen = new Set();
++  for (const block of String(out ?? "").split(/^@@ /m).slice(1)) {
++    const [path, ...lines] = block.split("\n");
++    const meta = {};
++    for (const l of lines) {
++      const m = /^([\w-]+):\s*(.*)$/.exec(l);
++      if (m) meta[m[1]] = unquote(m[2]);
++    }
++    const name = meta.name || path.split("/").slice(-2)[0];
++    if (!name || seen.has(name)) continue;
++    seen.add(name);
++    list.push({ name, description: meta.description ?? "", invocable: meta["disable-model-invocation"] !== "true" });
++  }
++  return list.sort((a, b) => a.name.localeCompare(b.name));
++}
++// "workflow-, linear-": the skills starting with one of them; empty keeps them all.
++function withPrefix(list, prefix) {
++  const ps = String(prefix ?? "").split(/[\s,]+/).filter(Boolean);
++  return ps.length ? list.filter((s) => ps.some((p) => s.name.startsWith(p))) : list;
++}
++// Clicking a skill writes "Use the <name> skill." on its own line where the cursor is.
++function insertSkill(text, at, name) {
++  const before = text.slice(0, at), after = text.slice(at);
++  const line = `Use the ${name} skill.`;
++  const head = before && !before.endsWith("\n") ? "\n" : "";
++  const tail = after.startsWith("\n") ? "" : "\n";
++  return { text: `${before}${head}${line}${tail}${after}`, at: before.length + head.length + line.length + tail.length };
++}
++// The agent's first message: what was typed, then what another mod passed (Linear's issue).
++const firstMessage = (typed, passed) => [String(typed ?? "").trim(), passed].filter(Boolean).join("\n\n") || undefined;
++
+ export default class Worktree extends View {
+   init(_props, cx) {
+     this.on = this.space()?.machine;
+@@ -254,13 +299,17 @@
+     this.inputFocused = this.opening || Boolean(props()?.branch);
+     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
+     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
+-    this.message = InputState.new({ placeholder: "first message to the agent (optional)" });
++    // Several lines: Enter goes to the next one, ⌘↵ creates.
++    this.message = TextareaState.new({ rows: 7, value: props()?.message ?? "", placeholder: "first message to the agent (optional)" });
+     this.message.on("change", (_e, cx) => this.suggest(cx));
+-    this.message.on("submit", (_e, cx) => this.go(cx));
++    this.message.on("submit", (e, cx) => { if (e?.secondary) this.go(cx); });
++    this.skills = null;
++    this.prefix = InputState.new({ placeholder: "workflow-" });
++    this.prefix.on("change", (_e, cx) => { this.savePrefix(); cx.notify(); });
+     this.spaceName = InputState.new({ value: props()?.name ?? "", placeholder: "space name (optional)" });
+     this.spaceName.on("submit", (_e, cx) => this.go(cx));
+     this.fieldFocus = "";
+-    for (const [field, state] of [["message", this.message], ["spaceName", this.spaceName]]) {
++    for (const [field, state] of [["message", this.message], ["spaceName", this.spaceName], ["prefix", this.prefix]]) {
+       state.on("focus", (_e, cx) => { this.fieldFocus = field; cx.notify(); });
+       state.on("blur", (_e, cx) => { if (this.fieldFocus === field) this.fieldFocus = ""; cx.notify(); });
+     }
+@@ -295,6 +344,7 @@
+           this.locked = await lockOf(repo.top, this.on);
+         }
+         if (repo && this.opening) this.list = await checkouts(repo, this.on);
++        if (repo && !this.opening && props().action !== "remove") this.loadSkills(repo, cx);
+         this.repo = repo;
+         cx.notify();
+         // The list (and with it the filter input) only mounts once loading is
+@@ -302,7 +352,8 @@
+         // loading lands on nothing and the dialog stays keyboard-dead.
+         this.handle.focus();
+         if (props().action !== "remove") cx.timer.after(100, () => this.busy || this.first().focus());
+-        if (props().branch) await this.work(cx);
++        // Linear's Work with the agent asks (`ask`): the fields come filled in and wait for Enter.
++        if (props().branch && !props().ask) await this.work(cx);
+       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
+     });
+   }
+@@ -322,13 +373,74 @@
+       this.pending = true;
+       return cx.notify();
+     }
+-    cx.spawn(async (cx) => this.work(cx));
++    // ⌘↵ reaches both the message field and the dialog: only one creates.
++    if (this.going) return;
++    this.going = true;
++    cx.spawn(async (cx) => { try { await this.work(cx); } finally { this.going = false; } });
+   }
+ 
+   first() {
+-    return this.opening || props()?.branch ? this.input : this.message;
++    return this.opening || (props()?.branch && !props()?.ask) ? this.input : this.message;
+   }
+ 
++  loadSkills(repo, cx) {
++    cx.spawn(async (cx) => {
++      const saved = await readTextFile(SKILL_PREFIX).catch(() => null);
++      let prefix = "workflow-";
++      try { if (saved !== null) prefix = JSON.parse(saved).prefix ?? prefix; } catch {}
++      this.loadingPrefix = true;
++      this.prefix.set_value(prefix);
++      this.loadingPrefix = false;
++      const r = await exec("sh", ["-c", SKILL_SCAN, "sh", `${repo.main}/.claude/skills`], { on: this.on }).catch(() => null);
++      this.skills = parseSkills(r?.stdout ?? "");
++      cx.notify();
++    });
++  }
++
++  savePrefix() {
++    if (this.loadingPrefix || checking()) return;
++    const text = JSON.stringify({ prefix: this.prefix.value() });
++    exec("sh", ["-c", 'mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"', "sh", SKILL_PREFIX, text]).catch(() => {});
++  }
++
++  useSkill(name, cx) {
++    if (this.busy) return;
++    const { start } = this.message.selected_range?.() ?? { start: this.message.value().length };
++    const next = insertSkill(this.message.value(), start, name);
++    this.message.set_value(next.text);
++    this.message.set_selected_range?.({ start: next.at, end: next.at });
++    this.message.focus();
++    this.suggest(cx);
++  }
++
++  // The sidebar: the skills with the prefix (the ones Claude can invoke itself first, then the
++  // manual ones under a line), a click writes one into the message.
++  skillsView(t) {
++    const shown = withPrefix(this.skills ?? [], this.prefix.value());
++    const prefix = this.busy
++      ? div().h(26).px(8).flex().items_center().rounded(6).border(1).border_color(t.input).text_size(11.5).text_color(t.muted).opacity(0.6).child(this.prefix.value() || " ")
++      : Input.new(this.prefix).h(26).px(8).items_center().rounded(6).border(1).border_color(this.fieldFocus === "prefix" ? t.accent : t.input).bg(t.background).text_size(11.5).text_color(t.foreground);
++    const row = (x) => v_flex().id(`skill-${x.name}`).flex_none().px(8).py(5).gap(2).rounded(6)
++      .when(!this.busy, (el) => el.cursor_pointer().hover((st) => st.bg(t.hover)).on_click((_e, cx) => this.useSkill(x.name, cx)))
++      .child(h_flex().gap(6).items_center()
++        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.foreground).child(x.name))
++        .when(!x.invocable, (el) => el.child(div().flex_none().px(5).rounded(4).bg(t.hover).text_size(10).text_color(t.dim).child("manual"))))
++      .when(Boolean(x.description), (el) => el.child(div().text_size(11).text_color(t.dim).truncate().child(x.description)));
++    return v_flex().w(230).flex_none().h_full().min_h(0).gap(8).pl(12).border_l(1).border_color(t.border)
++      .child(div().text_size(11).font_semibold().text_color(t.dim).child("SKILLS"))
++      .child(prefix)
++      .child(div().relative().flex_1().min_h(0)
++        .child(v_flex().id("skills-list").size_full().overflow_y_scroll().gap(1)
++          .when(this.skills === null, (el) => el.child(div().text_size(12).text_color(t.dim).child("…")))
++          .when(this.skills !== null && !shown.length, (el) => el.child(div().text_size(12).text_color(t.dim).child("No skill with this prefix in ~/.claude/skills or the repo's .claude/skills.")))
++          .children(shown.filter((x) => x.invocable).map(row))
++          .when(shown.some((x) => x.invocable) && shown.some((x) => !x.invocable), (el) => el.child(h_flex().flex_none().gap(6).items_center().px(8).py(4)
++            .child(div().flex_1().h(1).bg(t.border)).child(div().text_size(10).text_color(t.dim).child("manual")).child(div().flex_1().h(1).bg(t.border))))
++          .children(shown.filter((x) => !x.invocable).map(row)))
++        .child(Scrollbar.vertical("skills-list").absolute().inset_0()))
++      .child(div().text_size(11).text_color(t.dim).child("click: writes it in the message"));
++  }
++
+   typedBranch() {
+     return Boolean(this.text.trim()) && this.text !== this.auto;
+   }
+@@ -429,7 +541,7 @@
+     const r = await git(this.repo.top, add, this.on, 600_000);
+     if (!r.ok) return r.err || "git worktree add failed.";
+     const p = props();
+-    const task = p.task ?? (this.message.value().trim() || undefined);
++    const task = firstMessage(this.message.value(), p.task);
+     const agent = p.argv ?? (task ? this.worktrees.agent : undefined);
+     const setup = this.scripts("setup");
+     const argv = setup.length ? withSetup(setup, { repo: this.repo.main, path, branch }, agent) : agent;
+@@ -505,8 +617,8 @@
+   key(e, cx) {
+     if (e.key === "escape") return this.close();
+     if (e.key === "tab" && !this.opening && props()?.action !== "remove") {
+-      const order = [this.message, this.input, this.spaceName];
+-      const at = [this.fieldFocus === "message", this.inputFocused, this.fieldFocus === "spaceName"].indexOf(true);
++      const order = [this.message, this.input, this.spaceName, this.prefix];
++      const at = [this.fieldFocus === "message", this.inputFocused, this.fieldFocus === "spaceName", this.fieldFocus === "prefix"].indexOf(true);
+       order[(at + (e.modifiers?.shift ? order.length - 1 : 1) + order.length) % order.length].focus();
+       cx.stop_propagation();
+       return;
+@@ -520,6 +632,7 @@
+       return cx.notify();
+     }
+     if (e.key === "enter" && props()?.action === "remove") return this.go(cx);
++    if ((e.keystroke === "cmd-enter" || e.keystroke === "ctrl-enter") && !this.opening && props()?.action !== "remove") { cx.stop_propagation(); return this.go(cx); }
+   }
+ 
+   renderOpen(t) {
+@@ -610,15 +723,11 @@
+     const runs = !r || blocked || !steps.length ? ""
+       : onWindows(this.userHome) ? `${remove ? "Teardown" : "Setup"} scripts need sh, so they don't run on Windows.`
+         : `${remove ? "First runs" : "Then runs"} ${steps.map((c) => c.split("\n")[0]).join(", then ")} in the checkout.`;
+-    return v_flex()
+-      .id("worktree")
+-      .track_focus(this.handle)
+-      .on_key_down((e, cx) => this.key(e, cx))
+-      .size_full()
+-      .p(16)
++    const main = v_flex()
++      .flex_1()
++      .min_w(0)
++      .h_full()
+       .gap(10)
+-      .bg(t.popover)
+-      .text_size(13)
+       .child(div().font_semibold().text_color(t.foreground).child(title))
+       .child(div().text_color(t.muted).child(detail))
+       .when(Boolean(runs), (el) => el.child(div().text_size(12).text_color(t.dim).child(runs)))
+@@ -626,7 +735,9 @@
+       .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
+       .when(remove && this.locked !== null, (el) => el.child(div().text_color(t.blocked).child(`It's locked${lockedBy(this.locked)}: removing it overrides the lock.`)))
+       .when(!remove && !blocked, (el) =>
+-        el.child(this.field(this.message, this.fieldFocus === "message", t)).child(this.busy ? this.field(this.input, false, t) :
++        el.child(this.busy ? this.field(this.message, false, t)
++          : div().w_full().min_w(0).rounded(6).border(1).border_color(this.fieldFocus === "message" ? t.accent : t.input).bg(t.background).child(Textarea.new(this.message).w_full()))
++          .child(this.busy ? this.field(this.input, false, t) :
+           Input.new(this.input)
+             .h(32)
+             .px(10)
+@@ -650,7 +761,19 @@
+           .text_color(t.dim)
+           .gap(6)
+           .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
+-          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
++          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "⌘↵ create · tab next field · esc cancel"),
+       );
++    return h_flex()
++      .id("worktree")
++      .track_focus(this.handle)
++      .on_key_down((e, cx) => this.key(e, cx))
++      .size_full()
++      .items_start()
++      .p(16)
++      .gap(12)
++      .bg(t.popover)
++      .text_size(13)
++      .child(main)
++      .when(!remove && !blocked, (el) => el.child(this.skillsView(t)));
+   }
+ }

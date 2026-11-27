@@ -7,7 +7,7 @@ export default class WorktreeLauncher extends View {
       closeOverlay(props().overlay);
       const space = spaces().find((s) => s.active);
       const folder = panes().find((p) => p.focused && p.cwd)?.cwd;
-      openOverlay({ mod: "my-worktree", kind: "dialog", width: 460, height: 400, props: { space: space?.id, folder, action: "new" } });
+      openOverlay({ mod: "my-worktree", kind: "dialog", width: 800, height: 560, props: { space: space?.id, folder, action: "new" } });
     });
   }
 

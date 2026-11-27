@@ -10,7 +10,7 @@ place. `main.js` has three lists:
 - `COPIES`: Herdr's originals that get a copy (`mods/worktree` → `mods/my-worktree`,
   `layouts/main.json` → `layouts/my-main.json`, …);
 - `PATCHES`: `patches/<name>.patch`, applied in that order;
-- `STACKS`: the folders of `patches/` tried in turn. `patches/` is made on Herdr's `master`, `patches/0.1.18/` on the v0.1.18 release, `patches/0.1.17/` on v0.1.17, `patches/0.1.16/` on v0.1.16; the first stack that applies whole is used. Drop `0.1.16/` once the next release ships `master`'s worktree changes.
+- `STACKS`: the folders of `patches/` tried in turn. `patches/` is made on Herdr's `master`, `patches/0.1.18/` on the v0.1.18 release; the first stack that applies whole is used. Older releases aren't patched anymore.
 
 The patcher copies every original to a temporary folder at its own path
 (`mods/worktree/…`), applies each patch there with `git apply` (exact context, no fuzz),

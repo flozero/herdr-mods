@@ -59,7 +59,8 @@ function harness({ settings = null, files = {}, extra = {}, reply = () => undefi
   const store = {};
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element, svg: element, image: element,
-    Input: { new: () => { const el = element(); el.node.input = true; return el; } }, Scrollbar: { vertical: element }, InputState: { new: (o) => inputState(o?.value ?? "") }, theme: () => ({}),
+    Input: { new: () => { const el = element(); el.node.input = true; return el; } },
+    Textarea: { new: () => { const el = element(); el.node.input = true; return el; } }, TextareaState: { new: (o) => inputState(o?.value ?? "") }, Scrollbar: { vertical: element }, InputState: { new: (o) => inputState(o?.value ?? "") }, theme: () => ({}),
     appHome: () => "/app", home: () => "/home/user",
     readTextFile: async (path) => (path === "/app/settings.json" ? settings && JSON.stringify(settings) : files[path] ?? null),
     spaces: () => structuredClone(spaceList), panes: () => structuredClone(paneList),
@@ -76,11 +77,11 @@ function harness({ settings = null, files = {}, extra = {}, reply = () => undefi
     shared: (k) => store[k], setShared: (k, v) => { store[k] = v; }, checking: () => false,
     window: () => ({ platform: "macos" }), keys: () => [], terminals: () => [], knownAgents: async () => [], openOverlay: () => {},
   };
-  const names = ["Worktree", "worktreeSettings", "withSetup", "lockOf", "lockedBy", "branchOf"];
+  const names = ["Worktree", "worktreeSettings", "withSetup", "lockOf", "lockedBy", "branchOf", "parseSkills", "withPrefix", "insertSkill", "firstMessage"];
   const loaded = new Function(...Object.keys(globals), `${sourceOf("worktree")}; return { ${names.join(", ")} };`)(...Object.values(globals));
   const worktree = new loaded.Worktree();
   Object.assign(worktree, { opening: false, text: "", at: 0, repo, userHome: "/home/user", root: "/home/user/.herdr/worktrees",
-    message: inputState(), spaceName: inputState(), input: inputState(), dirty: false, unpushed: [], locked: null, naming: 0 });
+    message: inputState(), spaceName: inputState(), input: inputState(), prefix: inputState("workflow-"), skills: [], dirty: false, unpushed: [], locked: null, naming: 0 });
   return { ...loaded, worktree, writes, executions, notices, store, globals };
 }
 const project = (worktrees) => ({ [`${repo.main}/.herdr/settings.json`]: JSON.stringify({ worktrees }) });
@@ -280,10 +281,56 @@ test("while it creates, the fields are plain text: nothing can be typed in them"
   h.worktree.spaceName.set_value("PLA-1");
   h.worktree.input.set_value("me/pla-1-x");
   const inputs = (node) => (node?.input ? 1 : 0) + (node?.children ?? []).reduce((n, c) => n + inputs(c), 0);
-  assert.equal(inputs(h.worktree.render({}).node), 3);
+  assert.equal(inputs(h.worktree.render({}).node), 4);
   h.worktree.busy = true;
   const busy = h.worktree.render({}).node;
   assert.equal(inputs(busy), 0);
   assert.match(textOf(busy), /me\/pla-1-x/);
   assert.match(textOf(busy), /PLA-1/);
+});
+
+test("skills come from their front matter, filtered by the prefix, and a click writes one on its own line", { skip }, () => {
+  const h = harness();
+  const out = [
+    "@@ /h/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", 'description: "Grill a plan"', "disable-model-invocation: true",
+    "@@ /h/.claude/skills/other/SKILL.md", "name: other", "description: x",
+    "@@ /r/.claude/skills/workflow-grill/SKILL.md", "name: workflow-grill", "description: repo copy",
+    "@@ /r/.claude/skills/workflow-ship/SKILL.md", "description: ship it",
+  ].join("\n");
+  const list = h.parseSkills(out);
+  assert.deepEqual(list.map((s) => [s.name, s.description, s.invocable]), [["other", "x", true], ["workflow-grill", "Grill a plan", false], ["workflow-ship", "ship it", true]]);
+  assert.deepEqual(h.withPrefix(list, "workflow-").map((s) => s.name), ["workflow-grill", "workflow-ship"]);
+  assert.deepEqual(h.withPrefix(list, "other, workflow-s").map((s) => s.name), ["other", "workflow-ship"]);
+  assert.equal(h.withPrefix(list, " ").length, 3);
+  assert.deepEqual(h.insertSkill("", 0, "a"), { text: "Use the a skill.\n", at: 17 });
+  assert.deepEqual(h.insertSkill("do X", 4, "a"), { text: "do X\nUse the a skill.\n", at: 22 });
+  assert.deepEqual(h.insertSkill("do X\nthen Y", 5, "a"), { text: "do X\nUse the a skill.\nthen Y", at: 22 });
+  assert.equal(h.firstMessage(" do X \n then Y ", "Issue PLA-1"), "do X \n then Y\n\nIssue PLA-1");
+  assert.equal(h.firstMessage("", undefined), undefined);
+});
+
+test("Linear asks: the fields come filled in, nothing is made before ⌘↵, then the message and the issue go to the agent", { skip }, async () => {
+  const h = harness({ extra: { branch: "me/pla-1-x", name: "PLA-1", ask: true, argv: ["claude"], task: "Issue PLA-1", tab: "PLA-1" } });
+  Object.assign(h.worktree, { text: "me/pla-1-x", worktrees: await h.worktreeSettings(repo, "/home/user", null, true) });
+  assert.equal(h.worktree.first(), h.worktree.message);
+  h.worktree.skills = h.parseSkills("@@ /h/s/workflow-grill/SKILL.md\nname: workflow-grill\ndisable-model-invocation: true");
+  h.worktree.message.set_value("look at the logs first");
+  h.worktree.useSkill("workflow-grill", { notify() {}, timer: { after() {} } });
+  h.worktree.spaceName.set_value("PLA-1 logs");
+  assert.match(textOf(h.worktree.render({}).node), /manual/);
+  await h.worktree.create({});
+  const [[command, args]] = h.writes;
+  assert.equal(command, "space.new");
+  assert.equal(args.name, "PLA-1 logs");
+  assert.equal(args.task, "look at the logs first\nUse the workflow-grill skill.\n\nIssue PLA-1");
+});
+
+test("the sidebar lists the skills Claude can invoke first, then the manual ones under a line", { skip }, () => {
+  const h = harness();
+  h.worktree.skills = h.parseSkills(["@@ /s/workflow-a/SKILL.md", "name: workflow-a", "disable-model-invocation: true",
+    "@@ /s/workflow-b/SKILL.md", "name: workflow-b", "@@ /s/workflow-c/SKILL.md", "name: workflow-c"].join("\n"));
+  const text = textOf(h.worktree.skillsView({}).node);
+  assert.ok(text.indexOf("workflow-b") < text.indexOf("workflow-c"));
+  assert.ok(text.indexOf("workflow-c") < text.lastIndexOf("manual"));
+  assert.ok(text.lastIndexOf("manual") > text.indexOf("workflow-a") - 20 && text.indexOf("workflow-c") < text.indexOf("workflow-a"));
 });

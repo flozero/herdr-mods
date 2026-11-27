@@ -38,7 +38,7 @@ export function issueBranch(issue) {
 }
 
 export class Places {
-  constructor(worktreeMod = null) { this.scans = {}; this.pending = new Map(); this.worktreeMod = worktreeMod; this.rename = (branch) => branch; this.preferred = null; this.orchestrate = false; }
+  constructor(worktreeMod = null) { this.scans = {}; this.pending = new Map(); this.worktreeMod = worktreeMod; this.rename = (branch) => branch; this.preferred = null; }
 
   scanning() { return this.pending.size > 0; }
 
@@ -86,8 +86,7 @@ export class Places {
       }
     }
     for (const s of spaces()) {
-      const main = this.orchestrate && !s.machine && s.folder === this.preferred;
-      add(`space|${s.id}`, { kind: "tab", rank: main ? 2.7 : 0, space: s, folder: s.folder, repo: null, branch: s.branch ?? null });
+      add(`space|${s.id}`, { kind: "tab", rank: 0, space: s, folder: s.folder, repo: null, branch: s.branch ?? null });
     }
     return out.sort((a, b) => b.rank - a.rank);
   }
@@ -122,8 +121,9 @@ export class Places {
       return;
     }
     if (this.worktreeMod) {
-      openOverlay({ mod: this.worktreeMod, kind: "dialog", width: 460, height: 280,
-        props: { folder: c.folder, machine: c.machine, branch: c.branch, name: space, tab: name, argv, task, repoSpace: true } });
+      // The dialog comes filled in and waits (`ask`): the branch, the space's name and the skills can change there.
+      openOverlay({ mod: this.worktreeMod, kind: "dialog", width: 800, height: 560,
+        props: { folder: c.folder, machine: c.machine, branch: c.branch, name: space || name, tab: name, argv, task, repoSpace: true, ask: true } });
       return;
     }
     const o = on(c.machine);

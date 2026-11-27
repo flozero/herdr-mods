@@ -12,6 +12,5 @@
   "cacheDays": 30,
   "worktreeMod": "my-worktree",
   "worktreeRepo": "",
-  "branchPrefix": "",
-  "skill": ""
+  "branchPrefix": ""
 }

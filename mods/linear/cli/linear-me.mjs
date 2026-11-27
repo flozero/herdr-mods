@@ -188,7 +188,7 @@ export function newComments(comments, since, me) {
 
 export function wakeMessage(id, fresh) {
   const who = [...new Set(fresh.map((c) => c.author?.name ?? "someone"))].join(", ").replace(/[^\p{L}\p{N} .,_-]/gu, "");
-  return `[linear-watch] ${id}: ${fresh.length} new comment(s) on the issue from ${who}. Read them and do the linear-work follow-up for ${id}.`;
+  return `[linear-watch] ${id}: ${fresh.length} new comment(s) on the issue from ${who}. Read them and do the follow-up of the skill that watches ${id} (sdlc-watch-mr in workflow-linear-build).`;
 }
 
 export const KINDS = { comments: "linear.watch.", mr: "linear.mr.", pipeline: "linear.pipeline." };
@@ -321,7 +321,7 @@ async function watcher({ every, once }) {
     for (const w of ready.filter((x) => x.kind !== "comments")) {
       const r = await (w.kind === "mr" ? checkMr(w.value, gitlabMe) : checkPipeline(w.value)).catch(() => null);
       if (!r) continue;
-      const tail = r.done ? `Do the linear-work follow-up for ${w.id}.` : `do the linear-work follow-up for ${w.id}.`;
+      const tail = `${r.done ? "Do" : "do"} the follow-up of the skill that watches ${w.id} (sdlc-watch-mr or sdlc-deploy).`;
       await hc(["send", w.terminal, `[linear-watch] ${w.id}: ${r.text} ${tail}`]).catch(() => {});
       await hc(["label", w.terminal, `${KINDS[w.kind]}${w.id}=${r.done ? "" : r.value}`]).catch(() => {});
     }

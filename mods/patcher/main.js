@@ -11,8 +11,8 @@ const COPIES = [
   { from: "mods/workspace-status", to: "mods/my-workspace-status" },
   { from: "layouts/main.json", to: "layouts/my-main.json" },
 ];
-const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix", "configurable-agent", "statusbar"];
-const STACKS = ["", "0.1.18/", "0.1.17/", "0.1.16/"];
+const PATCHES = ["use-patched-copies", "sync-new-worktrees", "worktree-settings", "remove-locked-worktrees", "new-worktree-dialog", "new-space-here", "sync-existing-worktrees", "typed-branch-prefix", "configurable-agent", "statusbar", "worktree-skills"];
+const STACKS = ["", "0.1.18/"];
 const LAYOUT = "my-main";
 
 const out = (r) => (r.stderr || r.stdout || "").trim();

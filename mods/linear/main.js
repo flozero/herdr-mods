@@ -10,7 +10,7 @@ import { isoDay, parseDay } from "./dates.js";
 import * as Q from "./query.js";
 import { Images, splitMarkdown, splitImages, imageParts, imageUrls } from "./media.js";
 import { Store, JsonFile } from "./store.js";
-import { saveTemplate, deleteTemplate, parentChoices, startTask } from "./prompts.js";
+import { parentChoices } from "./prompts.js";
 import { T, setLanguage } from "./i18n.js";
 import { Places, issueBranch } from "./places.js";
 import { stateIcon } from "./states.js";
@@ -82,7 +82,6 @@ function ago(iso) {
 // cache is one file that every copy reads first.
 const STORE = new Store(`${appHome()}/${BASE}/.cache`, exec);
 const VIEWS = new JsonFile(`${appHome()}/${BASE}/.cache`, "views.json", exec);
-const PROMPTS = new JsonFile(`${appHome()}/${BASE}/.cache`, "prompts.json", exec);
 const CLI = () => `${appHome()}/${BASE}/cli/linear-me.mjs`;
 const ASK_DENY = [
   "Edit", "Write", "NotebookEdit",
@@ -103,7 +102,7 @@ export default class Linear extends View {
   init(_props, cx) {
     this.focusUntil = Date.now() + 2000;
     this.config = { agent: ["claude"], agentName: null, refreshSeconds: 120, taskContext: true, cacheDays: 30, worktreeMod: null,
-      worktreeRepo: null, branchPrefix: null, skill: null };
+      worktreeRepo: null, branchPrefix: null };
     this.branchPrefix = null;
     this.origin = props()?.origin ? this.placeOf(props().origin) : this.focusedPlace();
     this.views = [];
@@ -190,22 +189,6 @@ export default class Linear extends View {
     this.creating = null;
     this.shortcuts = false;
     this.actionsOpen = false;
-    this.starting = null;
-    this.templates = [];
-    this.startDraft = TextareaState.new({ rows: 8 });
-    this.startDraft.on("change", (_e, cx) => cx.notify());
-    this.startDraft.on("submit", (e, cx) => { if (e?.secondary) this.runStart(cx); });
-    this.templateInput = InputState.new({ placeholder: "" });
-    // The new worktree's branch and space, filled from the issue and editable.
-    this.branchInput = InputState.new({ placeholder: "" });
-    this.spaceInput = InputState.new({ placeholder: "" });
-    for (const [field, st] of [["branch", this.branchInput], ["space", this.spaceInput]]) {
-      st.on("change", (_e, cx) => cx.notify());
-      st.on("submit", (_e, cx) => this.runStart(cx));
-      st.on("focus", (_e, cx) => { if (this.starting) this.starting.field = field; cx.notify(); });
-      st.on("blur", (_e, cx) => { if (this.starting?.field === field) this.starting.field = null; cx.notify(); });
-    }
-    this.templateInput.on("submit", (_e, cx) => this.addTemplate(cx));
     this.newTitle = InputState.new({ placeholder: "" });
     this.newTitle.on("change", (_e, cx) => cx.notify());
     this.newTitle.on("submit", () => this.newBody.focus());
@@ -237,7 +220,6 @@ export default class Linear extends View {
       await this.loadConfig();
       this.places.worktreeMod = this.config.worktreeMod ?? null;
       this.linearConnected().then((on) => { this.canWrite = on; cx.notify(); });
-      this.places.orchestrate = Boolean(this.config.skill);
       this.places.preferred = this.config.worktreeRepo ? String(this.config.worktreeRepo).replace(/^~(?=\/|$)/, home()) : null;
       this.findPrefix().then((p) => { this.branchPrefix = p; });
       // Show the cache first, then fetch in the background.
@@ -262,7 +244,6 @@ export default class Linear extends View {
       this.collapsed = new Set(load("collapsed", []));
       this.favorites = load("favorites", null) ?? ((await VIEWS.read(null)) ?? load("myViews", [])).map((v) => (v.kind === "project" ? api.projectOf(v) : api.viewItem(v)));
       this.recentItems = load("recentItems", []);
-      this.templates = await PROMPTS.read([]);
       this.homeTab = load("homeTab", "projects");
       this.projects = { ...this.projects, nodes: load("projects", []) };
       this.views = load("views", []);
@@ -752,18 +733,24 @@ export default class Linear extends View {
     return true;
   }
 
+  // Actions → Start a new worktree with agent: Herdr's New worktree, filled in from the issue (its
+  // branch, the id as the space name, the issue as the agent's task), with the skills to pick there.
   openStart(issue, cx) {
-    const s = this.starting = { issue, parent: undefined, naming: false, field: null };
-    this.startDraft.set_value("");
-    this.templateInput.set_value("");
-    this.branchInput.set_value(this.ownBranch(issueBranch(issue)));
-    this.spaceInput.set_value(issue.identifier);
-    cx.timer.after(0, () => this.startDraft.focus());
+    if (this.sending) return;
+    this.say(T().starting, cx);
     cx.spawn(async (cx) => {
-      const parent = await this.parentRepo();
-      if (this.starting === s) { s.parent = parent; cx.notify(); }
+      try {
+        const parent = await this.parentRepo();
+        if (!parent) { this.say(T().noParentRepo, cx, "error"); return; }
+        const task = await this.taskFor(issue, false, cx);
+        await this.places.start(this.places.worktreeIn(parent, this.ownBranch(issueBranch(issue))),
+          { name: issue.identifier, argv: agentArgv(this.config), task, space: issue.identifier });
+        this.dismiss();
+      } catch (e) {
+        this.status = { text: `${T().pickFailed}: ${e?.message ?? e}`, level: "error" };
+        cx.notify();
+      }
     });
-    cx.notify();
   }
 
   // The git repo the agent works in: the parent repo of where Linear was opened from, the
@@ -772,112 +759,6 @@ export default class Linear extends View {
     const f = this.focusedPlace();
     const space = spaces().find((x) => x.id === focused()?.space);
     return this.places.parentRepo([this.origin?.cwd, f?.cwd, space?.folder, this.places.preferred]);
-  }
-
-  closeStart(cx) {
-    this.starting = null;
-    this.focusList();
-    cx.notify();
-  }
-
-
-  saveTemplates(list, cx) {
-    this.templates = list;
-    cx.spawn(async (cx) => {
-      try { await PROMPTS.write(list); } catch (e) { this.say(`${T().templateNotSaved}: ${e?.message ?? e}`, cx, "error"); }
-    });
-    cx.notify();
-  }
-
-  addTemplate(cx) {
-    const name = this.templateInput.value().trim(), text = this.startDraft.value();
-    const next = saveTemplate(this.templates, name, text);
-    if (next === this.templates) { this.say(name ? T().templateEmpty : T().templateNoName, cx); return; }
-    this.saveTemplates(next, cx);
-    this.starting.naming = false;
-    this.say(T().templateSaved(name), cx, "success");
-    cx.timer.after(0, () => this.startDraft.focus());
-  }
-
-  runStart(cx) {
-    const s = this.starting;
-    if (!s?.parent || this.sending) return;
-    const branch = this.branchInput.value().trim(), space = this.spaceInput.value().trim();
-    if (!branch) { this.say(T().branchEmpty, cx); this.branchInput.focus(); return; }
-    const c = this.places.worktreeIn(s.parent, branch);
-    this.sending = true;
-    this.say(T().starting, cx);
-    const prompt = this.startDraft.value();
-    cx.spawn(async (cx) => {
-      try {
-        const task = startTask(prompt, await this.taskFor(s.issue, Boolean(c.machine), cx));
-        await this.places.start(c, { name: s.issue.identifier, argv: agentArgv(this.config), task, space });
-        if (this.starting === s) { this.starting = null; this.dismiss(); }
-      } catch (e) {
-        this.status = { text: `${T().pickFailed}: ${e?.message ?? e}`, level: "error" };
-      } finally {
-        this.sending = false;
-        cx.notify();
-      }
-    });
-  }
-
-  startKey(k, cx) {
-    const s = this.starting;
-    if (k === "cmd-enter" || k === "ctrl-enter") this.runStart(cx);
-    else if (k === "escape" && s.naming) { s.naming = false; this.startDraft.focus(); cx.notify(); }
-    else if (k === "escape") this.closeStart(cx);
-    // Branch → space → prompt.
-    else if (k === "tab" && s.field) (s.field === "branch" ? this.spaceInput : this.startDraft).focus();
-    else if (k === "shift-tab" && s.field) (s.field === "space" ? this.branchInput : this.startDraft).focus();
-    else return false;
-    return true;
-  }
-
-  startView(t) {
-    const tr = T(), s = this.starting;
-    const where = div().text_size(11.5).text_color(s.parent === null ? t.blocked : t.dim)
-      .child(s.parent ? `${tr.repo} ${s.parent.repo ?? s.parent.name} · ${s.parent.folder.replace(home(), "~")}` : s.parent === null ? tr.noParentRepo : tr.scanning);
-    const field = (key, label, state) => h_flex().flex_1().min_w(0).gap(8).items_center()
-      .child(div().w(52).flex_none().text_size(11.5).text_color(t.dim).child(label))
-      .child(h_flex().id(`st-${key}`).flex_1().min_w(0).h(30).px(10).items_center().rounded(8).border_1().bg(t.background)
-        .border_color(s.field === key ? t.accent : t.border).child(Input.new(state).flex_1().h_full().text_size(12.5)));
-    const names = v_flex().gap(6)
-      .child(field("branch", tr.branchLabel, this.branchInput))
-      .child(field("space", tr.spaceLabel, this.spaceInput));
-    const templates = v_flex().gap(4)
-      .child(div().text_size(11).font_semibold().text_color(t.dim).child(tr.templates))
-      .child(this.templates.length
-        ? h_flex().gap(6).flex_wrap().items_center().children(this.templates.map((x, n) => h_flex().id(`st-tpl-${n}`).h(24).pl(9).pr(3).gap(4).items_center()
-          .rounded(12).border_1().border_color(t.border).text_size(11.5)
-          .child(div().id(`st-tpl-use-${n}`).cursor_pointer().hover((st) => st.text_color(t.accent)).on_mouse_down("left", stop)
-            .on_click((_e, cx) => { this.startDraft.set_value(x.text); this.startDraft.focus(); cx.notify(); }).child(x.name))
-          .child(this.miniButton(t, `st-tpl-del-${n}`, "×", (cx) => this.saveTemplates(deleteTemplate(this.templates, x.name), cx)))))
-        : div().text_size(12).text_color(t.dim).child(tr.noTemplates));
-    const canStart = Boolean(s.parent) && !this.sending;
-    const panel = v_flex().id("start-agent").w(560).max_w_full().gap(12).p(16).rounded(10).border_1().border_color(t.border).bg(t.popover).shadow_lg()
-      .on_mouse_down("left", stop).on_scroll_wheel((_e, cx) => cx.stop_propagation())
-      .child(div().text_size(14).font_semibold().child(tr.startTitle(s.issue.identifier)))
-      .child(where)
-      .child(names)
-      .child(div().w_full().min_w(0).rounded(8).border_1().bg(t.background).border_color(t.border)
-        .child(Textarea.new(this.startDraft).w_full()))
-      .child(templates)
-      .when(s.naming, (el) => el.child(h_flex().gap(8).items_center()
-        .child(h_flex().flex_1().h(30).px(10).items_center().rounded(8).border_1().bg(t.background).border_color(t.accent)
-          .child(Input.new(this.templateInput).flex_1().h_full()))
-        .child(this.button(t, "st-tpl-save", tr.save, (cx) => this.addTemplate(cx), true))))
-      .child(h_flex().gap(8).items_center()
-        .child(div().flex_1().min_w(0).text_size(11).text_color(t.dim).child(tr.startHint))
-        .when(!s.naming, (el) => el.child(this.button(t, "st-tpl", tr.saveTemplate, (cx) => {
-          if (!this.startDraft.value().trim()) { this.say(tr.templateEmpty, cx); return; }
-          s.naming = true; cx.timer.after(0, () => this.templateInput.focus()); cx.notify();
-        })))
-        .child(this.button(t, "st-cancel", tr.cancel, (cx) => this.closeStart(cx)))
-        .child(this.button(t, "st-go", this.sending ? tr.starting : tr.start, (cx) => this.runStart(cx), canStart)));
-    return h_flex().absolute().inset_0().items_center().justify_center().bg("#00000066")
-      .child(div().id("start-back").absolute().inset_0().on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.closeStart(cx); }))
-      .child(panel);
   }
 
   createView(t) {
@@ -1809,7 +1690,7 @@ export default class Linear extends View {
   // images as local files (left out when the agent runs on another machine, where the paths don't exist).
 
   async taskFor(issue, remote, cx, asked = null) {
-    const head = asked ?? (this.config.skill ? T().taskSkill(issue, this.config.skill) : T().task(issue));
+    const head = asked ?? T().task(issue);
     if (!this.config.taskContext) return head;
     const id = issue.identifier;
     try { await this.loadDetail(cx, id); } catch {}
@@ -2006,7 +1887,6 @@ export default class Linear extends View {
     const issue = id ? (this.details[id]?.issue ?? this.cache[id]) : null;
     if (k === "ctrl-/" || (this.shortcuts && k === "escape")) { this.shortcuts = !this.shortcuts; cx.notify(); cx.stop_propagation(); return; }
     if (this.creating) { if (this.createKey(k, cx)) cx.stop_propagation(); return; }
-    if (this.starting) { if (this.startKey(k, cx)) cx.stop_propagation(); return; }
     if (this.actionsOpen && this.mode === "detail" && k === "escape") { this.actionsOpen = false; cx.notify(); cx.stop_propagation(); return; }
     if (this.finding && this.mode === "list") {
       if (k === "escape") { if (this.findInput.value()) { this.findInput.set_value(""); this.sel = 0; cx.notify(); } else this.focusList(); cx.stop_propagation(); }
@@ -2119,14 +1999,12 @@ export default class Linear extends View {
       .when(Boolean(this.pop) && this.mode === "list", (el) => el.child(this.popView(t)))
       .when(Boolean(this.lightbox), (el) => el.child(this.lightboxView(t)))
       .when(Boolean(this.creating), (el) => el.child(this.createView(t)))
-      .when(Boolean(this.starting), (el) => el.child(this.startView(t)))
       .when(Boolean(this.shortcuts), (el) => el.child(this.shortcutsView(t)));
   }
 
   shortcutRows() {
     const tr = T();
     if (this.creating) return tr.keysNew;
-    if (this.starting) return tr.keysStart;
     if (this.editFocus) return tr.keysEdit;
     if (this.composing) return tr.keysComment(this.agentName());
     if (this.mode === "detail") return tr.keysDetail(this.agentName(), this.canWrite);
