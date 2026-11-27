@@ -1,25 +1,16 @@
 import { View, div } from "gpui-kit";
-import { props, closeOverlay, run, panes, spaces } from "herdr";
-
-const NAME = "HTTP";
+import { props, closeOverlay, panes, run } from "herdr";
 
 export default class HttpOpen extends View {
   init(_props, cx) {
-    cx.spawn(async () => {
-      try { this.open(); } finally { closeOverlay(props().overlay); }
+    cx.timer.after(0, () => {
+      closeOverlay(props().overlay);
+      const focused = panes().find((p) => p.focused);
+      if (focused?.mod === "http") return;
+      const open = panes().find((p) => p.mod === "http" && p.tab === focused?.tab);
+      if (open) run("pane.focus", { pane: open.pane });
+      else run("pane.split", { direction: "right", mod: "http" });
     });
-  }
-
-  open() {
-    for (const s of spaces()) {
-      const tab = s.tabs.find((tb) => tb.name === NAME && panes().some((p) => p.tab === tb.id && p.mod === "http"));
-      if (tab) {
-        run("space.select", { id: s.id });
-        run("tab.select", { id: tab.id });
-        return;
-      }
-    }
-    run("tab.new", { name: NAME, mod: "http" });
   }
 
   render() {
