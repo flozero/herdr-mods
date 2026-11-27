@@ -7,15 +7,15 @@ disable-model-invocation: true
 
 # Teach a merge request
 
-After AI Hero's `/teach` (aihero.dev/skills-teach), for one merge request. In French, in this terminal. You only read: never edit files, never post, approve or change anything on GitLab, never check out, switch or commit.
+After AI Hero's `/teach` (aihero.dev/skills-teach), for one merge request. In French, in this terminal. You teach, you don't change: no edits, nothing posted or approved on GitLab, no commit, push or branch switch.
 
 ## Sources
 
 Only these, never what you think you know about the code:
 
-- the merge request: `glab mr view <iid> --comments`, `glab mr diff <iid>`, its commits (`glab api` is not allowed: use `glab mr view` and git);
+- the merge request: `glab mr view <iid> --comments`, `glab mr diff <iid>`, its commits;
 - the Linear issue in its description or branch, if any (`get_issue`, `list_comments`);
-- the code around the change: `git fetch origin <branch>`, then `git show origin/<branch>:<path>`, and the files it calls or is called by.
+- the code around the change, in this worktree on its branch: the files it calls or is called by.
 
 Every claim points at `path:line`. When the sources don't say, write "je ne sais pas" and where you would look.
 

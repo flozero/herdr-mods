@@ -3,6 +3,5 @@
   "agent": [
     "claude"
   ],
-  "agentName": "Claude",
-  "agentAskArgs": null
+  "agentName": "Claude"
 }

@@ -10,7 +10,7 @@ import { reviewMessage, threadsMessage, branchDiff, worktreeStamp, draftsQuestio
 import { fetchRules, matchRules } from "./rules.js";
 import { editPoint, mentionAt, rankPeople, insertMention } from "./mention.js";
 import { branchCheckout, installedEditors, openIn, worktreeSetup, HERDR_EDITOR } from "./editor.js";
-import { agentArgv, agentName, askArgv } from "./agent.js";
+import { agentArgv, agentName } from "./agent.js";
 import { keyLabels } from "./kbd.js";
 import { stackTree } from "./stack.js";
 
@@ -37,19 +37,8 @@ const CODE_MARGIN = 48;
 const CODE_JUMP = 8;
 const THREADS_EVERY = 60000;
 const CALL_LIMIT = 90000;
-const DENY = [
-  "Edit", "Write", "NotebookEdit",
-  "Bash(glab mr note:*)", "Bash(glab mr approve:*)", "Bash(glab mr revoke:*)", "Bash(glab mr merge:*)",
-  "Bash(glab mr update:*)", "Bash(glab mr close:*)", "Bash(glab mr reopen:*)", "Bash(glab mr rebase:*)",
-  "Bash(glab mr checkout:*)", "Bash(glab api:*)",
-  "Bash(git checkout:*)", "Bash(git switch:*)", "Bash(git commit:*)", "Bash(git push:*)",
-  "Bash(git reset:*)", "Bash(git stash:*)", "Bash(git rebase:*)", "Bash(git merge:*)",
-];
 const TABS = ["description", "changes", "comments", "review"];
 const ICON = "mods/gitlab-review/icons";
-// The ask agent: the same denials, no plan mode, and the Excalidraw canvas for gitlab-teach's drawings.
-const readArgv = (config, deny) => (Array.isArray(config?.agentAskArgs) || agentArgv(config)[0].split("/").pop() !== "claude"
-  ? askArgv(config, deny) : [...agentArgv(config), "--settings", JSON.stringify({ permissions: { deny, allow: ["mcp__excalidraw"] } })]);
 // The agents' colors, when Herdr's program table has none.
 const AGENT_COLOR = { claude: "#D97757", codex: "#10A37F", gemini: "#4285F4", opencode: "#A78BFA", cursor: "#38BDF8", aider: "#22C55E", amp: "#F472B6", other: "#60A5FA" };
 const LIST_TABS = ["review", "authored", "merged", "ignored"];
@@ -146,9 +135,7 @@ export default class GitlabReview extends View {
     this.remote = null;
     this.fixer = null;
     this.notes = [];
-    this.claude = null;
     this.config = {};
-    this.briefed = new Set();
     this.ignored = {};
     this.seen = {};
     this.viewed = {};
@@ -1990,8 +1977,8 @@ export default class GitlabReview extends View {
       mr.web_url,
       `Branch ${mr.source_branch} into ${mr.target_branch}, by ${who(mr.author)}.`,
       "",
-      "Rules: answer me here, in this terminal. Never post comments, approvals or anything else to GitLab, never edit files, and never check out, switch or commit.",
-      `Read what you need with \`glab mr view ${mr.iid} --comments\`, \`glab mr diff ${mr.iid}\`, and \`git fetch origin ${safeBranch(mr.source_branch)}\` then \`git show origin/${safeBranch(mr.source_branch)}:<path>\` for whole files.`,
+      "You are in a worktree on its branch: read the code here. Answer me in this terminal. You may change files to try something, but never commit, push, switch branches or post anything to GitLab unless I ask.",
+      `\`glab mr view ${mr.iid} --comments\` and \`glab mr diff ${mr.iid}\` give the description, the threads and the diff.`,
       ...(rules.length ? ["", "Team review rules that apply to this merge request (I may ask you to review against them):",
         ...rules.map(({ rule, globs }) => `- ${rule.page_title}${rule.page_url ? ` (${rule.page_url})` : ""}: ${globs.join(", ")}`)] : []),
     ].join("\n");
@@ -2008,20 +1995,8 @@ export default class GitlabReview extends View {
     return agentName(this.config);
   }
 
-  claudeAlive() {
-    return Boolean(this.claude) && terminals().some((x) => x.address === this.claude && x.state === "live");
-  }
-
-  claudeShown() {
-    return panes().some((p) => p.terminal === this.claude);
-  }
-
   wait(cx, ms) {
     return new Promise((resolve) => cx.timer.after(ms, () => resolve()));
-  }
-
-  async showClaude(cx) {
-    return this.showRight(cx, this.claude);
   }
 
   async showRight(cx, address) {
@@ -2042,14 +2017,9 @@ export default class GitlabReview extends View {
     this.say(`Asking ${this.agentName()} to rebase ${mr.source_branch}…`, cx);
     cx.spawn(async (cx) => {
       try {
-        let path = this.top;
-        if (!this.local) {
-          const out = await branchCheckout(exec, this.top, mr.source_branch, home());
-          if (out.created && out.path !== out.main) await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main: out.main, path: out.path, branch: mr.source_branch });
-          path = out.path;
-        }
-        const where = await this.sendToAgent(cx, path, text, `Rebase · ${path.split("/").pop()}`);
-        this.say(`${this.agentName()} is rebasing ${mr.source_branch}, ${where}`, cx, "success");
+        await this.agentOnBranch(cx, mr, text, () => text);
+        this.say(`${this.agentName()} is rebasing ${mr.source_branch}, beside its review`, cx, "success");
+        this.leaveOverlay();
       } catch (e) {
         this.say(`Couldn't ask for the rebase: ${e?.message ?? e}`, cx, "error");
       } finally {
@@ -2059,28 +2029,73 @@ export default class GitlabReview extends View {
     });
   }
 
-  // Sends the text to an agent already open on the folder (this tab's first), else opens a tab with one there.
-  async sendToAgent(cx, path, text, name) {
-    const here = focused()?.tab;
-    const on = panes().filter((p) => p.terminal && p.program?.agent && (p.cwd === path || String(p.cwd ?? "").startsWith(`${path}/`)));
-    const pane = on.find((p) => p.tab === here) ?? on[0];
+  // The branch's worktree, made and set up (the worktree mods' setup script) the first time.
+  async worktreeOf(mr, cx) {
+    if (this.local) return { path: this.top, created: false };
+    const { path, created, main } = await branchCheckout(exec, this.top, mr.source_branch, home());
+    if (created && path !== main) {
+      this.say(`Setting up the worktree for ${mr.source_branch}…`, cx);
+      const setup = await worktreeSetup({ exec, readFile: fs.readFile, appHome: appHome(), userHome: home(), main, path, branch: mr.source_branch });
+      if (setup.code !== 0) this.say(`Worktree setup failed: ${(setup.stderr || setup.stdout || "").trim().split("\n").pop()}`, cx, "error");
+    }
+    return { path, created };
+  }
+
+  // The branch's review in its worktree's space, selected: opened there when missing. Local, it is this one.
+  async reviewTabOf(cx, path, created) {
+    if (this.local) return focused()?.tab ?? null;
+    const name = `Review · ${path.split("/").pop()}`;
+    const find = () => {
+      for (const space of spaces()) {
+        const tab = space.tabs.find((x) => x.name === name && panes().some((p) => p.tab === x.id && p.mod === "gitlab-review"));
+        if (tab) return { space, tab };
+      }
+      return null;
+    };
+    let at = find();
+    if (!at) {
+      await this.openModTab(cx, path, { name, mod: "gitlab-review", props: { cwd: path, local: true } }, created);
+      for (let i = 0; i < 60 && !(at = find()); i++) await this.wait(cx, 50);
+    }
+    if (!at) throw new Error(`the review of ${path.split("/").pop()} didn't open`);
+    run("space.select", { id: at.space.id });
+    run("tab.select", { id: at.tab.id });
+    return at.tab.id;
+  }
+
+  // One agent per branch, on the right of its review in the worktree's space: the text goes to it,
+  // or `first()` starts it there. `text` null only shows it.
+  async agentOnBranch(cx, mr, text, first) {
+    const { path, created } = await this.worktreeOf(mr, cx);
+    const tab = await this.reviewTabOf(cx, path, created);
+    const inside = (p) => p.cwd === path || String(p.cwd ?? "").startsWith(`${path}/`);
+    const pane = panes().find((p) => p.tab === tab && p.terminal && p.program?.agent && inside(p));
+    this.briefedAgents ??= new Map();
     if (pane) {
-      const r = await hc(["send", pane.terminal, text]);
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || "hc send failed");
-      if (pane.tab === here) return "in the pane of this tab";
-      const space = spaces().find((x) => x.tabs.some((tab) => tab.id === pane.tab));
-      if (space) run("space.select", { id: space.id });
-      run("tab.select", { id: pane.tab });
-      run("pane.focus", { terminal: pane.terminal });
-      return "in its tab";
+      const known = this.briefedAgents.get(pane.terminal) ?? new Set();
+      const message = known.has(mr.iid) ? text : first();
+      if (message) {
+        const r = await hc(["send", pane.terminal, message]);
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || "hc send failed");
+      }
+      known.add(mr.iid);
+      this.briefedAgents.set(pane.terminal, known);
+      run("pane.focus", { pane: pane.pane });
+      if (this.local) this.fixer = pane.terminal;
+      return pane.terminal;
     }
-    let space = spaces().find((x) => x.folder === path);
-    if (!space) {
-      run("space.new", { folder: path, name: path.split("/").pop(), focus: false });
-      for (let i = 0; i < 40 && !(space = spaces().find((x) => x.folder === path)); i++) await this.wait(cx, 50);
-    }
-    run("tab.new", { name, folder: path, argv: agentArgv(this.config), task: text, focus: true, ...(space ? { space: space.id } : {}) });
-    return "in a new tab";
+    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", `mr-${mr.iid}-${Date.now().toString(36)}`, "--cwd", path, "--", ...agentArgv(this.config), first()]);
+    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
+    const term = JSON.parse(r.stdout).address;
+    this.briefedAgents.set(term, new Set([mr.iid]));
+    if (this.local) this.fixer = term;
+    await this.showRight(cx, term);
+    return term;
+  }
+
+  // The review window gives way to the space where the agent is.
+  leaveOverlay() {
+    if (!this.local && props()?.overlay) this.dismiss();
   }
 
   // A button that hands work to the agent: its icon, in its color.
@@ -2097,26 +2112,9 @@ export default class GitlabReview extends View {
   }
 
   async handToClaude(text, cx) {
-    const alive = this.fixer && terminals().some((x) => x.address === this.fixer && x.state === "live");
-    if (alive) {
-      const r = await hc(["send", this.fixer, text]);
-      if (r.code !== 0) throw new Error((r.stderr || r.stdout || "").trim() || "hc send failed");
-      await this.showRight(cx, this.fixer);
-      return;
-    }
-    const name = `branch-review-${Date.now().toString(36)}`;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...agentArgv(this.config), text]);
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    this.fixer = JSON.parse(r.stdout).address ?? name;
-    await this.showRight(cx, this.fixer);
+    await this.agentOnBranch(cx, this.details[this.iid].mr, text, () => text);
   }
 
-  async launchClaude(text) {
-    const name = `mr-review-${Date.now().toString(36)}`;
-    const r = await hc(["run", "--bg", "--json", "--no-parent", "--no-notify", "--name", name, "--cwd", this.top, "--", ...readArgv(this.config, DENY), text]);
-    if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-    return JSON.parse(r.stdout).address ?? name;
-  }
 
   ask(cx) {
     const d = this.details[this.iid], q = this.draft.value().trim();
@@ -2129,24 +2127,12 @@ export default class GitlabReview extends View {
   askClaude(cx, d, question, done) {
     if (Date.now() - this.askedAt < 800) return false;
     this.askedAt = Date.now();
-    const iid = d.mr.iid;
-    const here = focused()?.pane ?? null;
+    this.say(`Opening ${d.mr.source_branch} for ${this.agentName()}…`, cx);
     cx.spawn(async (cx) => {
       try {
-        if (this.claudeAlive()) {
-          const text = this.briefed.has(iid) ? `[MR !${iid}] ${question}` : this.firstQuestion(d.mr, question);
-          if (!this.claudeShown()) await this.showClaude(cx);
-          const r = await hc(["send", this.claude, text]);
-          if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-        } else {
-          this.claude = await this.launchClaude(this.firstQuestion(d.mr, question));
-          this.briefed = new Set();
-        }
-        this.briefed.add(iid);
-        const shown = await this.showClaude(cx);
-        if (here) run("pane.focus", { pane: here });
-        this.say(shown ? `${done}: the answer comes in the pane on the right · g to jump there`
-          : `${done}, still starting in the background · g to show its pane`, cx, "success");
+        await this.agentOnBranch(cx, d.mr, question, () => this.firstQuestion(d.mr, question));
+        this.say(`${done}: the answer comes beside the review of ${d.mr.source_branch}`, cx, "success");
+        this.leaveOverlay();
       } catch (e) {
         this.askedAt = 0;
         this.say(`Couldn't reach ${this.agentName()}: ${e?.message ?? e}`, cx, "error");
@@ -2160,7 +2146,6 @@ export default class GitlabReview extends View {
     const d = this.details[this.iid];
     if (!d || Date.now() - this.askedAt < 800) return;
     this.askedAt = Date.now();
-    const iid = d.mr.iid;
     cx.spawn(async (cx) => {
       try {
         let term;
@@ -2170,21 +2155,14 @@ export default class GitlabReview extends View {
           else await this.handToClaude(`We work together on branch ${d.mr.source_branch}${d.base ? ` against ${d.base}` : ""} in this repository. I review its changes in Herdr and send you my comments and questions here. Wait for my first message.`, cx);
           term = this.fixer;
         } else {
-          if (!this.claudeAlive()) {
-            this.claude = await this.launchClaude(this.firstQuestion(d.mr, null));
-            this.briefed = new Set([iid]);
-          } else if (!this.briefed.has(iid)) {
-            const r = await hc(["send", this.claude, this.firstQuestion(d.mr, null)]);
-            if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
-            this.briefed.add(iid);
-          }
-          await this.showClaude(cx);
-          term = this.claude;
+          this.say(`Opening ${d.mr.source_branch} for ${this.agentName()}…`, cx);
+          term = await this.agentOnBranch(cx, d.mr, null, () => this.firstQuestion(d.mr, null));
         }
         const shown = panes().some((p) => p.terminal === term);
         if (shown) run("pane.focus", { terminal: term });
-        this.say(shown ? (this.local ? `${this.agentName()} is on the right: a sends your review there too` : `${this.agentName()} is on the right: ⌥↵ questions and rule reviews go there too`)
+        this.say(shown ? `${this.agentName()} is beside the review of ${d.mr.source_branch}: your questions and review go there`
           : `${this.agentName()} is starting in the background · g to show its pane`, cx, "success");
+        if (shown) this.leaveOverlay();
       } catch (e) {
         this.askedAt = 0;
         this.say(`Couldn't reach ${this.agentName()}: ${e?.message ?? e}`, cx, "error");

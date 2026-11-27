@@ -6,7 +6,7 @@
 
 Review GitLab merge requests in a Herdr window: a person picker at the top of the list (you by default, `p` for someone else) with four filters on that person: to review, authored, recent merged and ignored (`1`–`4`), the description, the diff (split or unified), threads, draft comments, approvals.
 
-- **Ask the agent** (`g`, or Send to ▾ → the agent, `⌥↵`, in the comment box) opens a read-only agent on the right that knows the merge request and answers your questions. Nothing is posted. Before its first answer on a merge request it asks whether you understand it; if not, it teaches it first with the `gitlab-teach` skill (installed with the mod: short lessons, a drawing in Excalidraw, each claim at `path:line`, after AI Hero's `/teach`).
+- **Ask the agent** (`g`, or Send to ▾ → the agent, `⌥↵`, in the comment box) opens the branch's worktree (made and set up the first time, like Editor), the branch's review in its space, and the agent on its right: one agent per branch, which also gets the rebase and the local review. It may change files there to try something, but is told never to commit, push or post unless you ask. Before its first answer on a merge request it asks whether you understand it; if not, it teaches it first with the `gitlab-teach` skill (installed with the mod: short lessons, a drawing in Excalidraw, each claim at `path:line`, after AI Hero's `/teach`).
 - **On the merge request**: edit the title (click it), the description and labels; resolve threads; apply a reviewer's suggestion (`Suggest a change` in the comment box writes one); edit or delete your comments; reactions; re-request a review; mark files viewed (`v`, kept on this computer, reset when the file's diff changes). When the branch is behind its target, ask the agent to rebase it.
 - **Actions** (the `Actions ▾` button in the sidebar): mark as ready or draft, open in the browser or an editor, ignore, search, reload.
 - **The comment box**: `Add to review` (`⌘↵`) keeps the comment pending; `Send to ▾` sends the review to the agent or to GitLab; `Review ▾` approves or requests changes (with the pending comments and the text, if any), closes, closes with the text as a comment, reopens, or discards the pending comments.
@@ -32,7 +32,6 @@ From `keys/gitlab-review.json` and `keys/gitlab-review.linux.json`. The other ke
 | `rulesUrl` | `""` | optional, `https://` only: a URL that answers `{ "rule_sets": [{ "page_title", "page_url", "mode", "globs", "body" }] }` |
 | `agent` | `["claude"]` | the agent command; the first message is its last argument |
 | `agentName` | from `agent` (`claude` → `Claude`) | the name shown on buttons and messages |
-| `agentAskArgs` | `null` | extra arguments for Ask; `null` with `claude` means `--permission-mode plan` plus a deny list of edits, checkouts, commits, pushes and `glab` writes, `null` with another agent means none |
 
 ## Requirements
 
